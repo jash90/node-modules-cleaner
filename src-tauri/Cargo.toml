@@ -4,7 +4,7 @@ version = "1.0.0"
 description = "A cross-platform desktop app to scan and clean node_modules folders"
 authors = ["Bartłomiej Zimny"]
 license = "MIT"
-repository = "https://github.com/AverageDev16/node-modules-cleaner"
+repository = "https://github.com/jash90/node-modules-cleaner"
 edition = "2021"
 
 [build-dependencies]

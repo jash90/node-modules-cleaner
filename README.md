@@ -16,9 +16,9 @@ Download the latest release for your platform:
 
 | Platform | Download |
 |----------|----------|
-| Windows | [.msi installer](https://github.com/AverageDev16/node-modules-cleaner/releases/latest) |
-| macOS | [.dmg installer](https://github.com/AverageDev16/node-modules-cleaner/releases/latest) |
-| Linux | [.deb](https://github.com/AverageDev16/node-modules-cleaner/releases/latest) / [.AppImage](https://github.com/AverageDev16/node-modules-cleaner/releases/latest) |
+| Windows | [.msi installer](https://github.com/jash90/node-modules-cleaner/releases/latest) |
+| macOS | [.dmg installer](https://github.com/jash90/node-modules-cleaner/releases/latest) |
+| Linux | [.deb](https://github.com/jash90/node-modules-cleaner/releases/latest) / [.AppImage](https://github.com/jash90/node-modules-cleaner/releases/latest) |
 
 > **Note:** The app is not code-signed. On macOS, right-click and select "Open" to bypass Gatekeeper. On Windows, click "More info" → "Run anyway".
 
@@ -42,7 +42,7 @@ Download the latest release for your platform:
 
 ```bash
 # Clone the repository
-git clone https://github.com/AverageDev16/node-modules-cleaner.git
+git clone https://github.com/jash90/node-modules-cleaner.git
 cd node-modules-cleaner
 
 # Install dependencies

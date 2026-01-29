@@ -61,7 +61,7 @@ jobs:
           releaseBody: |
             ## What's New
 
-            See the [full changelog](https://github.com/AverageDev16/node-modules-cleaner/commits/${{ github.ref_name }}) for details.
+            See the [full changelog](https://github.com/jash90/node-modules-cleaner/commits/${{ github.ref_name }}) for details.
 
             ## Downloads
 
