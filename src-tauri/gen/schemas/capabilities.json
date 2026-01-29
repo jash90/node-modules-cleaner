@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"Default capabilities for Node Modules Cleaner","local":true,"windows":["main"],"permissions":["core:default","dialog:default","dialog:allow-open","fs:default","fs:allow-read","fs:allow-write","fs:allow-remove","fs:read-all","fs:write-all","shell:default","shell:allow-open"]}}
