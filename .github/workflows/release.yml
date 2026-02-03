@@ -4,78 +4,135 @@ on:
   push:
     tags:
       - 'v*'
+    paths:
+      - 'src/**'
+      - 'src-tauri/**'
+      - 'package.json'
+      - 'package-lock.json'
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
-  build:
+  release:
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
-            args: --target aarch64-apple-darwin
-            rust_target: aarch64-apple-darwin
-          - platform: macos-latest
-            args: --target x86_64-apple-darwin
-            rust_target: x86_64-apple-darwin
-          - platform: ubuntu-22.04
+          - platform: 'macos-latest'
+            args: '--target aarch64-apple-darwin'
+            rust_target: 'aarch64-apple-darwin'
+          - platform: 'macos-latest'
+            args: '--target x86_64-apple-darwin'
+            rust_target: 'x86_64-apple-darwin'
+          - platform: 'ubuntu-22.04'
             args: ''
             rust_target: ''
-          - platform: windows-latest
+          - platform: 'windows-latest'
             args: ''
             rust_target: ''
 
     runs-on: ${{ matrix.platform }}
-
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: 'npm'
+          node-version: 'lts/*'
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.rust_target }}
 
-      - name: Install Linux dependencies
+      - name: Cache node_modules
+        uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            src-tauri/target/
+          key: ${{ runner.os }}-cargo-${{ matrix.rust_target }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.rust_target }}-
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Configure sccache
+        shell: bash
+        run: |
+          echo "SCCACHE_GHA_ENABLED=true" >> $GITHUB_ENV
+          echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
+
+      - name: Install dependencies (Ubuntu only)
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      - name: Install npm dependencies
-        run: npm ci
+      - name: Install frontend dependencies
+        run: npm install
 
-      - name: Build Tauri app
+      - name: Setup Ruby (macOS)
+        if: runner.os == 'macOS'
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2'
+          bundler-cache: true
+          working-directory: fastlane
+
+      - name: Setup keychain and certificates (macOS)
+        if: runner.os == 'macOS'
+        working-directory: fastlane
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          MATCH_GIT_URL: ${{ secrets.MATCH_GIT_URL }}
+          MATCH_PASSWORD: ${{ secrets.MATCH_PASSWORD }}
+          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          bundle exec fastlane setup_ci_keychain
+          bundle exec fastlane sync_certs
+
+      - name: Build the app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APPLE_SIGNING_IDENTITY: ${{ runner.os == 'macOS' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Node Modules Cleaner ${{ github.ref_name }}'
+          tagName: v__VERSION__
+          releaseName: 'Node Modules Cleaner v__VERSION__'
           releaseBody: |
-            ## What's New
+            ## Node Modules Cleaner
 
-            See the [full changelog](https://github.com/jash90/node-modules-cleaner/commits/${{ github.ref_name }}) for details.
+            Desktop application for scanning and removing node_modules folders to free up disk space.
 
-            ## Downloads
+            ### Features
+            - Scan directories for node_modules folders
+            - Display folder sizes
+            - Batch delete to reclaim disk space
+            - Cross-platform support
 
-            | Platform | File |
-            |----------|------|
-            | Windows | `.msi` installer |
-            | macOS (Apple Silicon) | `.dmg` installer |
-            | macOS (Intel) | `.dmg` installer |
-            | Linux | `.deb` package, `.AppImage` |
-
-            > **Note:** These builds are not code-signed. You may need to allow the app in your system settings.
-          releaseDraft: false
+            ### Downloads
+            - **Windows**: `.msi` or `.exe` installer
+            - **macOS**: `.dmg` (Intel & Apple Silicon)
+            - **Linux**: `.deb` or `.AppImage`
+          releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}

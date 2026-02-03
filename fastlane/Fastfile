@@ -1,0 +1,24 @@
+default_platform(:mac)
+
+platform :mac do
+  desc "Setup keychain for CI"
+  lane :setup_ci_keychain do
+    create_keychain(
+      name: "build.keychain",
+      password: ENV["KEYCHAIN_PASSWORD"],
+      default_keychain: true,
+      unlock: true,
+      timeout: 3600
+    )
+  end
+
+  desc "Sync certificates using match"
+  lane :sync_certs do
+    match(
+      type: "developer_id",
+      readonly: is_ci,
+      keychain_name: "build.keychain",
+      keychain_password: ENV["KEYCHAIN_PASSWORD"]
+    )
+  end
+end

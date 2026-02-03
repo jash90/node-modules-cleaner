@@ -1,0 +1,6 @@
+git_url(ENV["MATCH_GIT_URL"])
+storage_mode("git")
+type("developer_id")
+platform("macos")
+app_identifier("com.nodemodulescleaner.desktop")
+team_id(ENV["APPLE_TEAM_ID"])
