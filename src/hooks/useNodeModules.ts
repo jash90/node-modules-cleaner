@@ -28,6 +28,9 @@ export function useNodeModules() {
         case 'path':
           comparison = a.path.localeCompare(b.path);
           break;
+        case 'manager':
+          comparison = a.package_manager.localeCompare(b.package_manager);
+          break;
       }
 
       return sortConfig.direction === 'asc' ? comparison : -comparison;

@@ -39,6 +39,12 @@ export function SortControls({ sortConfig, onSort }: SortControlsProps) {
       >
         Path{getSortIndicator('path')}
       </button>
+      <button
+        onClick={() => onSort('manager')}
+        className={buttonClass('manager')}
+      >
+        Manager{getSortIndicator('manager')}
+      </button>
     </div>
   );
 }

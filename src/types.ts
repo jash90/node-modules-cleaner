@@ -2,6 +2,7 @@ export interface NodeModulesFolder {
   path: string;
   size: number;
   parent_project: string;
+  package_manager: string;
 }
 
 export interface ScanResult {
@@ -16,7 +17,7 @@ export interface DeleteResult {
   error: string | null;
 }
 
-export type SortField = 'name' | 'size' | 'path';
+export type SortField = 'name' | 'size' | 'path' | 'manager';
 export type SortDirection = 'asc' | 'desc';
 
 export interface SortConfig {

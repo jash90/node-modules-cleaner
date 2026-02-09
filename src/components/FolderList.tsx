@@ -1,6 +1,23 @@
 import type { NodeModulesFolder } from '../types';
 import { SizeDisplay } from './SizeDisplay';
 
+const BADGE_COLORS: Record<string, string> = {
+  npm: 'bg-red-100 text-red-700',
+  yarn: 'bg-blue-100 text-blue-700',
+  pnpm: 'bg-amber-100 text-amber-700',
+  bun: 'bg-yellow-100 text-yellow-700',
+  unknown: 'bg-gray-100 text-gray-500',
+};
+
+function PackageManagerBadge({ manager }: { manager: string }) {
+  const colors = BADGE_COLORS[manager] ?? BADGE_COLORS.unknown;
+  return (
+    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium leading-none ${colors}`}>
+      {manager}
+    </span>
+  );
+}
+
 interface FolderListProps {
   folders: NodeModulesFolder[];
   selectedPaths: Set<string>;
@@ -85,6 +102,7 @@ export function FolderList({
                     <span className="font-medium text-gray-900">
                       {folder.parent_project}
                     </span>
+                    <PackageManagerBadge manager={folder.package_manager} />
                     <span className="text-gray-400">/</span>
                     <span className="text-gray-600 text-sm">node_modules</span>
                   </div>

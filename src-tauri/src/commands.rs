@@ -10,6 +10,7 @@ pub struct NodeModulesFolder {
     pub path: String,
     pub size: u64,
     pub parent_project: String,
+    pub package_manager: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,6 +44,21 @@ fn calculate_dir_size(path: &Path) -> u64 {
         });
 
     size.load(Ordering::Relaxed)
+}
+
+/// Detect the package manager used in the parent directory of a node_modules folder
+fn detect_package_manager(parent: &Path) -> String {
+    if parent.join("bun.lockb").exists() || parent.join("bun.lock").exists() {
+        "bun".to_string()
+    } else if parent.join("pnpm-lock.yaml").exists() {
+        "pnpm".to_string()
+    } else if parent.join("yarn.lock").exists() {
+        "yarn".to_string()
+    } else if parent.join("package-lock.json").exists() {
+        "npm".to_string()
+    } else {
+        "unknown".to_string()
+    }
 }
 
 /// Get the parent project name from a node_modules path
@@ -96,10 +112,12 @@ pub async fn scan_for_node_modules(path: String) -> Result<ScanResult, String> {
         .par_iter()
         .map(|path| {
             let size = calculate_dir_size(path);
+            let parent = path.parent().unwrap_or(path);
             NodeModulesFolder {
                 path: path.to_string_lossy().to_string(),
                 size,
                 parent_project: get_parent_project(path),
+                package_manager: detect_package_manager(parent),
             }
         })
         .collect();
