@@ -13,12 +13,12 @@
     "windows": [
       {
         "title": "Node Modules Cleaner",
-        "width": 900,
-        "height": 700,
+        "width": 1200,
+        "height": 800,
         "resizable": true,
         "fullscreen": false,
-        "minWidth": 600,
-        "minHeight": 400
+        "minWidth": 1200,
+        "minHeight": 800
       }
     ],
     "security": {
