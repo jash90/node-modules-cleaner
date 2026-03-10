@@ -25,9 +25,6 @@ export function useNodeModules() {
         case 'size':
           comparison = a.size - b.size;
           break;
-        case 'path':
-          comparison = a.path.localeCompare(b.path);
-          break;
         case 'manager':
           comparison = a.package_manager.localeCompare(b.package_manager);
           break;

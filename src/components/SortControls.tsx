@@ -34,12 +34,6 @@ export function SortControls({ sortConfig, onSort }: SortControlsProps) {
         Size{getSortIndicator('size')}
       </button>
       <button
-        onClick={() => onSort('path')}
-        className={buttonClass('path')}
-      >
-        Path{getSortIndicator('path')}
-      </button>
-      <button
         onClick={() => onSort('manager')}
         className={buttonClass('manager')}
       >
