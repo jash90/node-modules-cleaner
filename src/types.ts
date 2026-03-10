@@ -1,8 +1,13 @@
+export interface TopPackage {
+  name: string;
+}
+
 export interface NodeModulesFolder {
   path: string;
   size: number;
   parent_project: string;
   package_manager: string;
+  top_packages: TopPackage[];
 }
 
 export interface ScanResult {
@@ -17,7 +22,7 @@ export interface DeleteResult {
   error: string | null;
 }
 
-export type SortField = 'name' | 'size' | 'path' | 'manager';
+export type SortField = 'name' | 'size' | 'manager';
 export type SortDirection = 'asc' | 'desc';
 
 export interface SortConfig {

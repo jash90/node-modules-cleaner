@@ -109,6 +109,18 @@ export function FolderList({
                   <p className="text-xs text-gray-400 truncate mt-0.5" title={folder.path}>
                     {folder.path}
                   </p>
+                  {folder.top_packages.length > 0 && (
+                    <div className="flex gap-1 flex-wrap mt-1">
+                      {folder.top_packages.map((pkg) => (
+                        <span
+                          key={pkg.name}
+                          className="inline-flex items-center px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 text-[10px] leading-none"
+                        >
+                          {pkg.name}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <SizeDisplay bytes={folder.size} className="text-right whitespace-nowrap" />
               </li>
