@@ -28,7 +28,10 @@ A fast, cross-platform desktop application that scans your filesystem for `node_
 
 - **Parallel Scanning** — Uses Rust's Rayon for blazing-fast recursive directory scanning
 - **Size Analysis** — Displays the size of each `node_modules` folder found
+- **Top Packages Detection** — Identifies technologies used (React, Next, Vue, Express, etc.) from `package.json` and shows them as badges
+- **Package Manager Detection** — Detects npm, yarn, pnpm, or bun based on lock files
 - **Selective Deletion** — Choose exactly which folders to remove with checkboxes
+- **Sorting & Filtering** — Sort by name, size, or package manager
 - **Cross-Platform** — Native apps for Windows, macOS, and Linux
 - **Lightweight** — Small binary size thanks to Tauri architecture
 
