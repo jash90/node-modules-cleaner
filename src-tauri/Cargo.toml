@@ -1,6 +1,6 @@
 [package]
 name = "node-modules-cleaner"
-version = "1.0.2"
+version = "1.0.3"
 description = "A cross-platform desktop app to scan and clean node_modules folders"
 authors = ["Bartłomiej Zimny"]
 license = "MIT"
