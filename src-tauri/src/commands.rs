@@ -34,7 +34,7 @@ pub struct DeleteResult {
 }
 
 /// Calculate the size of a directory recursively
-fn calculate_dir_size(path: &Path) -> u64 {
+pub(crate) fn calculate_dir_size(path: &Path) -> u64 {
     let size = AtomicU64::new(0);
 
     WalkDir::new(path)
@@ -272,6 +272,35 @@ fn get_parent_project(node_modules_path: &Path) -> String {
         .to_string()
 }
 
+fn find_node_modules_paths(scan_path: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut entries = WalkDir::new(scan_path).into_iter();
+
+    while let Some(entry) = entries.next() {
+        let Ok(entry) = entry else {
+            continue;
+        };
+
+        let is_hidden = entry
+            .file_name()
+            .to_str()
+            .map(|name| name.starts_with('.') && name != ".")
+            .unwrap_or(false);
+
+        if is_hidden && entry.file_type().is_dir() {
+            entries.skip_current_dir();
+            continue;
+        }
+
+        if entry.file_type().is_dir() && entry.file_name() == "node_modules" {
+            paths.push(entry.path().to_path_buf());
+            entries.skip_current_dir();
+        }
+    }
+
+    paths
+}
+
 #[tauri::command]
 pub async fn scan_for_node_modules(path: String) -> Result<ScanResult, String> {
     let scan_path = Path::new(&path);
@@ -284,29 +313,9 @@ pub async fn scan_for_node_modules(path: String) -> Result<ScanResult, String> {
         return Err("Path is not a directory".to_string());
     }
 
-    // First, find all node_modules directories
-    let node_modules_paths: Vec<_> = WalkDir::new(scan_path)
-        .into_iter()
-        .filter_entry(|e| {
-            // Don't recurse into node_modules directories we find
-            let parent_is_node_modules = e.path()
-                .parent()
-                .and_then(|p| p.file_name())
-                .map(|n| n == "node_modules")
-                .unwrap_or(false);
-
-            // Skip hidden directories except the entry itself
-            let is_hidden = e.file_name()
-                .to_str()
-                .map(|s| s.starts_with('.') && s != ".")
-                .unwrap_or(false);
-
-            !parent_is_node_modules && !is_hidden
-        })
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_dir() && e.file_name() == "node_modules")
-        .map(|e| e.path().to_path_buf())
-        .collect();
+    // Keep only outermost node_modules directories. Their recursive size
+    // already includes any dependency-level node_modules folders inside.
+    let node_modules_paths = find_node_modules_paths(scan_path);
 
     // Calculate sizes in parallel
     let folders: Vec<NodeModulesFolder> = node_modules_paths
@@ -365,4 +374,44 @@ pub async fn get_folder_size(path: String) -> Result<u64, String> {
     }
 
     Ok(calculate_dir_size(path_ref))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_node_modules_paths;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestDirectory(PathBuf);
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn scan_keeps_only_outermost_node_modules_directories() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "node-modules-cleaner-nested-test-{}-{unique}",
+            std::process::id(),
+        ));
+        let _cleanup = TestDirectory(root.clone());
+        let outer = root.join("project/node_modules");
+        let nested = outer.join("dependency/node_modules");
+        let separate = root.join("other-project/node_modules");
+
+        fs::create_dir_all(&nested).expect("nested fixture should be created");
+        fs::create_dir_all(&separate).expect("separate fixture should be created");
+
+        let mut found = find_node_modules_paths(&root);
+        found.sort();
+
+        assert_eq!(found, vec![separate, outer]);
+    }
 }

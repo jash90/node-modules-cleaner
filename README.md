@@ -31,6 +31,7 @@ A fast, cross-platform desktop application that scans your filesystem for `node_
 - **Top Packages Detection** — Identifies technologies used (React, Next, Vue, Express, etc.) from `package.json` and shows them as badges
 - **Package Manager Detection** — Detects npm, yarn, pnpm, or bun based on lock files
 - **Selective Deletion** — Choose exactly which folders to remove with checkboxes
+- **Merged Worktree Cleanup** — Finds worktrees whose branches are merged into the repository default, protects dirty worktrees, and removes them without deleting branches
 - **Sorting & Filtering** — Sort by name, size, or package manager
 - **Cross-Platform** — Native apps for Windows, macOS, and Linux
 - **Lightweight** — Small binary size thanks to Tauri architecture
@@ -67,9 +68,11 @@ A fast, cross-platform desktop application that scans your filesystem for `node_
 ## How It Works
 
 1. **Select a folder** — Choose a directory to scan (e.g., your Projects folder)
-2. **Wait for scan** — The app recursively finds all `node_modules` folders
-3. **Review results** — See each folder's path and size
-4. **Delete selected** — Check the folders you want to remove and click Delete
+2. **Wait for scan** — One scan finds both `node_modules` folders and merged Git worktrees
+3. **Review both panels** — `node_modules` results appear first, with merged worktrees in a separate panel below
+4. **Remove selected** — Select items from either panel and confirm them together
+
+For linked Git worktrees, the app compares each branch with `origin/HEAD` (falling back to local `main` or `master`), disables removal when uncommitted changes are present or Git has locked the worktree, warns when ignored content will also be deleted, and uses `git worktree remove` for selected clean worktrees. Git branches are kept.
 
 ## Build from Source
 

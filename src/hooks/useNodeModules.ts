@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { open } from '@tauri-apps/plugin-dialog';
 import type { NodeModulesFolder, ScanResult, DeleteResult, SortConfig } from '../types';
+import { removeCandidatesWithinPaths } from '../utils/cleanupSummary';
 
 export function useNodeModules() {
   const [folders, setFolders] = useState<NodeModulesFolder[]>([]);
@@ -36,38 +36,19 @@ export function useNodeModules() {
     return sorted;
   }, [folders, sortConfig]);
 
-  const selectDirectory = useCallback(async () => {
-    try {
-      const selected = await open({
-        directory: true,
-        multiple: false,
-        title: 'Select folder to scan for node_modules',
-      });
-
-      if (selected) {
-        return selected as string;
-      }
-      return null;
-    } catch (err) {
-      setError(`Failed to open directory picker: ${err}`);
-      return null;
-    }
-  }, []);
-
-  const scan = useCallback(async (path?: string) => {
-    const targetPath = path || (await selectDirectory());
-
-    if (!targetPath) return;
+  const scan = useCallback(async (path: string) => {
+    if (isScanning || isDeleting) return;
 
     setIsScanning(true);
     setError(null);
     setFolders([]);
     setSelectedPaths(new Set());
     setDeleteResults([]);
-    setScanPath(targetPath);
+    setTotalSize(0);
+    setScanPath(path);
 
     try {
-      const result = await invoke<ScanResult>('scan_for_node_modules', { path: targetPath });
+      const result = await invoke<ScanResult>('scan_for_node_modules', { path });
       setFolders(result.folders);
       setTotalSize(result.total_size);
     } catch (err) {
@@ -75,7 +56,7 @@ export function useNodeModules() {
     } finally {
       setIsScanning(false);
     }
-  }, [selectDirectory]);
+  }, [isDeleting, isScanning]);
 
   const toggleSelection = useCallback((path: string) => {
     setSelectedPaths(prev => {
@@ -97,21 +78,28 @@ export function useNodeModules() {
     setSelectedPaths(new Set());
   }, []);
 
-  const deleteSelected = useCallback(async () => {
-    if (selectedPaths.size === 0) return;
+  const deleteSelected = useCallback(async (
+    paths: string[],
+  ): Promise<NodeModulesFolder[]> => {
+    if (paths.length === 0 || isDeleting || isScanning) return [];
 
     setIsDeleting(true);
     setError(null);
 
     try {
-      const paths = Array.from(selectedPaths);
+      const selectedPathSet = new Set(paths);
+      const deletionTargets = folders.filter((folder) => selectedPathSet.has(folder.path));
       const results = await invoke<DeleteResult[]>('delete_folders', { paths });
       setDeleteResults(results);
 
       // Remove successfully deleted folders from the list
-      const successfullyDeleted = new Set(
-        results.filter(r => r.success).map(r => r.path)
-      );
+      const successfullyDeleted = new Set<string>();
+      results.forEach((result) => {
+        if (result.success) successfullyDeleted.add(result.path);
+      });
+      const deletedFolders = deletionTargets.filter((folder) => (
+        successfullyDeleted.has(folder.path)
+      ));
 
       setFolders(prev => prev.filter(f => !successfullyDeleted.has(f.path)));
       setSelectedPaths(prev => {
@@ -121,22 +109,23 @@ export function useNodeModules() {
       });
 
       // Update total size
-      const deletedSize = folders
-        .filter(f => successfullyDeleted.has(f.path))
+      const deletedSize = deletedFolders
         .reduce((sum, f) => sum + f.size, 0);
-      setTotalSize(prev => prev - deletedSize);
+      setTotalSize(prev => Math.max(0, prev - deletedSize));
 
       // Check for errors
       const errors = results.filter(r => !r.success);
       if (errors.length > 0) {
         setError(`Failed to delete ${errors.length} folder(s). Check permissions.`);
       }
+      return deletedFolders;
     } catch (err) {
       setError(`Delete operation failed: ${err}`);
+      return [];
     } finally {
       setIsDeleting(false);
     }
-  }, [selectedPaths, folders]);
+  }, [folders, isDeleting, isScanning]);
 
   const setSort = useCallback((field: SortConfig['field']) => {
     setSortConfig(prev => ({
@@ -144,6 +133,25 @@ export function useNodeModules() {
       direction: prev.field === field && prev.direction === 'desc' ? 'asc' : 'desc',
     }));
   }, []);
+
+  const reconcileAfterCleanup = useCallback((
+    deletedFolders: NodeModulesFolder[],
+    removedWorktreePaths: string[],
+  ) => {
+    const deletedPaths = new Set(deletedFolders.map((folder) => folder.path));
+    const afterFolderDeletion = folders.filter((folder) => !deletedPaths.has(folder.path));
+    const remainingFolders = removeCandidatesWithinPaths(
+      afterFolderDeletion,
+      removedWorktreePaths,
+    );
+    const remainingPaths = new Set(remainingFolders.map((folder) => folder.path));
+
+    setFolders(remainingFolders);
+    setSelectedPaths((current) => new Set(
+      Array.from(current).filter((path) => remainingPaths.has(path)),
+    ));
+    setTotalSize(remainingFolders.reduce((total, folder) => total + folder.size, 0));
+  }, [folders]);
 
   const selectedSize = useMemo(() => {
     return folders
@@ -167,6 +175,7 @@ export function useNodeModules() {
     selectAll,
     deselectAll,
     deleteSelected,
+    reconcileAfterCleanup,
     setSort,
     clearError: () => setError(null),
   };

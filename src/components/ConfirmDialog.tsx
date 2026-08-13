@@ -1,8 +1,11 @@
-import { formatSize } from './SizeDisplay';
+import { formatSize } from '../utils/formatSize';
 
 interface ConfirmDialogProps {
   isOpen: boolean;
-  selectedCount: number;
+  title: string;
+  description: string;
+  items: Array<{ label: string; count: number }>;
+  confirmLabel: string;
   selectedSize: number;
   onConfirm: () => void;
   onCancel: () => void;
@@ -10,7 +13,10 @@ interface ConfirmDialogProps {
 
 export function ConfirmDialog({
   isOpen,
-  selectedCount,
+  title,
+  description,
+  items,
+  confirmLabel,
   selectedSize,
   onConfirm,
   onCancel,
@@ -20,7 +26,9 @@ export function ConfirmDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center">
       {/* Backdrop */}
-      <div
+      <button
+        type="button"
+        aria-label="Close confirmation dialog"
         className="absolute inset-0 bg-black/50"
         onClick={onCancel}
       />
@@ -35,20 +43,22 @@ export function ConfirmDialog({
           </div>
           <div>
             <h3 className="text-lg font-semibold text-gray-900">
-              Delete node_modules?
+              {title}
             </h3>
             <p className="text-sm text-gray-500">
-              This action cannot be undone
+              {description}
             </p>
           </div>
         </div>
 
         <div className="bg-gray-50 rounded-lg p-4 mb-6">
-          <div className="flex justify-between text-sm mb-2">
-            <span className="text-gray-600">Folders to delete:</span>
-            <span className="font-medium text-gray-900">{selectedCount}</span>
-          </div>
-          <div className="flex justify-between text-sm">
+          {items.map((item) => (
+            <div key={item.label} className="flex justify-between text-sm mb-2">
+              <span className="text-gray-600">{item.label}:</span>
+              <span className="font-medium text-gray-900">{item.count}</span>
+            </div>
+          ))}
+          <div className="flex justify-between text-sm border-t border-gray-200 pt-2 mt-1">
             <span className="text-gray-600">Space to free:</span>
             <span className="font-medium text-green-600">{formatSize(selectedSize)}</span>
           </div>
@@ -65,7 +75,7 @@ export function ConfirmDialog({
             onClick={onConfirm}
             className="flex-1 px-4 py-2.5 rounded-lg bg-red-600 text-white font-medium hover:bg-red-700 transition-colors"
           >
-            Delete
+            {confirmLabel}
           </button>
         </div>
       </div>
