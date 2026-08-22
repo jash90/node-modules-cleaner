@@ -22,12 +22,14 @@
 
 ---
 
-A fast, cross-platform desktop application that scans your filesystem for `node_modules` folders and helps you delete them to free up gigabytes of disk space.
+A fast, cross-platform desktop application that reclaims disk space from `node_modules` folders, merged Git worktrees, and the shared developer caches that quietly grow to tens of gigabytes.
 
 ## Features
 
 - **Parallel Scanning** — Uses Rust's Rayon for blazing-fast recursive directory scanning
-- **Size Analysis** — Displays the size of each `node_modules` folder found
+- **Honest Size Analysis** — Reports what a delete actually frees, not the nominal folder size
+- **Developer Cache Cleanup** — Finds shared caches outside your projects: npm, pnpm, bun, yarn, uv, Gradle, puppeteer browser builds, and old Node versions under nvm
+- **Abandoned Store Detection** — Spots pnpm stores left behind when the tool changed its default location, telling them apart from the store actually in use
 - **Top Packages Detection** — Identifies technologies used (React, Next, Vue, Express, etc.) from `package.json` and shows them as badges
 - **Package Manager Detection** — Detects npm, yarn, pnpm, or bun based on lock files
 - **Selective Deletion** — Choose exactly which folders to remove with checkboxes
@@ -35,6 +37,21 @@ A fast, cross-platform desktop application that scans your filesystem for `node_
 - **Sorting & Filtering** — Sort by name, size, or package manager
 - **Cross-Platform** — Native apps for Windows, macOS, and Linux
 - **Lightweight** — Small binary size thanks to Tauri architecture
+
+### Why sizes differ from what you expect
+
+Summing file lengths is the obvious way to size a folder and it is wrong in three
+common cases, each of which this app measures properly:
+
+| Case | What naive sizing reports | What you actually get back |
+|------|---------------------------|----------------------------|
+| `node_modules` under pnpm or bun | full size of every file | close to nothing — the files are hardlinks into a shared store, and the data survives the delete |
+| Sparse files (VM disk images) | the nominal size, sometimes hundreds of GB | only the blocks really written |
+| Cloud-evicted files (iCloud Drive) | the nominal size | nothing — the bytes are not on this machine |
+
+Each row shows the reclaimable figure, with the nominal size beside it when the two
+disagree. Caches owned by a tool with its own prune command are handed to that tool
+rather than deleted, so entries still referenced by your projects are kept.
 
 ## Download
 
@@ -71,6 +88,11 @@ A fast, cross-platform desktop application that scans your filesystem for `node_
 2. **Wait for scan** — One scan finds both `node_modules` folders and merged Git worktrees
 3. **Review both panels** — `node_modules` results appear first, with merged worktrees in a separate panel below
 4. **Remove selected** — Select items from either panel and confirm them together
+
+The **Developer caches** panel needs no folder — those caches live at fixed locations,
+so you can scan and clean them straight away. Targets are grouped by kind and each one
+states how it will be cleaned: deleted, emptied in place, or handed to the owning tool's
+prune command.
 
 For linked Git worktrees, the app compares each branch with `origin/HEAD` (falling back to local `main` or `master`), disables removal when uncommitted changes are present or Git has locked the worktree, warns when ignored content will also be deleted, and uses `git worktree remove` for selected clean worktrees. Git branches are kept.
 

@@ -121,12 +121,19 @@ jobs:
           releaseBody: |
             ## Node Modules Cleaner
 
-            Desktop application for scanning and removing node_modules folders to free up disk space.
+            Desktop application for reclaiming disk space from `node_modules` folders,
+            merged Git worktrees, and shared developer caches.
 
             ### Features
-            - Scan directories for node_modules folders
-            - Display folder sizes
-            - Batch delete to reclaim disk space
+            - Scan directories for `node_modules` folders and merged Git worktrees
+            - Scan shared developer caches — npm, pnpm, bun, yarn, uv, Gradle, puppeteer, nvm
+            - Detect pnpm stores abandoned when the tool moved its default location
+            - Report what a delete actually frees, not the nominal folder size:
+              allocated blocks rather than file lengths, hardlinked files counted once,
+              and files still linked from outside the tree counted as zero
+            - Delegate to a tool's own prune where one exists, so referenced entries survive
+            - Empty unrotated logs in place, keeping the writing service's file handle valid
+            - Batch delete with per-path failure reporting
             - Cross-platform support
 
             ### Downloads

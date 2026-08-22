@@ -1,4 +1,5 @@
 import type { NodeModulesFolder } from '../types';
+import { formatSize } from '../utils/formatSize';
 import { SizeDisplay } from './SizeDisplay';
 
 const BADGE_COLORS: Record<string, string> = {
@@ -131,7 +132,21 @@ export function FolderList({
                       </div>
                     )}
                   </div>
-                  <SizeDisplay bytes={folder.size} className="text-right whitespace-nowrap" />
+                  <div className="text-right whitespace-nowrap">
+                    <SizeDisplay bytes={folder.reclaimable_size} className="block" />
+                    {folder.size > folder.reclaimable_size * 1.2 && (
+                      <span
+                        className="text-[10px] text-gray-400"
+                        title={
+                          folder.package_manager === 'pnpm' || folder.package_manager === 'bun'
+                            ? 'Most files here are hardlinks into the shared store — the data survives this delete, so only the difference is actually freed'
+                            : 'Nominal size exceeds what deleting releases: shared, sparse or cloud-evicted files'
+                        }
+                      >
+                        of {formatSize(folder.size)} nominal
+                      </span>
+                    )}
+                  </div>
                 </label>
               </li>
             ))}

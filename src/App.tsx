@@ -1,7 +1,9 @@
 import { useState } from 'react';
 import { useCleanup } from './hooks/useCleanup';
+import { useDevCaches } from './hooks/useDevCaches';
 import { FolderList } from './components/FolderList';
 import { WorktreeList } from './components/WorktreeList';
+import { CacheList } from './components/CacheList';
 import { SortControls } from './components/SortControls';
 import { SizeDisplay } from './components/SizeDisplay';
 import { ConfirmDialog } from './components/ConfirmDialog';
@@ -37,7 +39,9 @@ function BranchIcon({ className }: { className: string }) {
 
 function App() {
   const cleanup = useCleanup();
+  const caches = useDevCaches();
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
+  const [showCacheDialog, setShowCacheDialog] = useState(false);
   const {
     nodeModules,
     mergedWorktrees,
@@ -53,6 +57,59 @@ function App() {
     setShowConfirmDialog(false);
     void cleanup.deleteSelected();
   };
+
+  const confirmCacheCleanup = () => {
+    setShowCacheDialog(false);
+    void caches.cleanSelected();
+  };
+
+  // Caches live at fixed locations, so this panel works before any folder is picked.
+  const cacheSection = (
+    <section className="bg-white rounded-lg border border-sky-200 shadow-sm overflow-hidden">
+      <CacheList
+        targets={caches.targets}
+        selectedPaths={caches.selectedIds}
+        warnings={caches.warnings}
+        isScanning={caches.isScanning}
+        onToggleSelection={caches.toggleSelection}
+        onSelectSafe={caches.selectSafe}
+        onDeselectAll={caches.deselectAll}
+        onScan={() => void caches.scan()}
+        selectionDisabled={caches.isCleaning}
+      />
+      {caches.selectedIds.size > 0 && (
+        <div className="flex items-center justify-between gap-4 px-4 py-3 bg-sky-50/70 border-t border-sky-100">
+          <span className="text-sm text-gray-600">
+            {caches.selectedIds.size} selected &middot;{' '}
+            <span className="font-medium text-green-700">
+              {formatSize(caches.selectedReclaimable)}
+            </span>{' '}
+            will be freed{caches.selectionHasEstimate ? ' at least — prune targets free an amount known only once they run' : ''}
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowCacheDialog(true)}
+            disabled={caches.isCleaning}
+            className="px-3 py-1.5 bg-sky-600 text-white text-sm font-medium rounded-lg hover:bg-sky-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
+          >
+            {caches.isCleaning ? (<><Spinner />Cleaning...</>) : 'Clean selected'}
+          </button>
+        </div>
+      )}
+      {caches.freedBytes > 0 && (
+        <div className="px-4 py-2 bg-green-50 border-t border-green-100 text-sm text-green-800">
+          Freed {formatSize(caches.freedBytes)}.
+          {caches.lastCleanup
+            .filter((result) => result.output)
+            .map((result) => (
+              <span key={result.path} className="block text-xs text-green-700 font-mono mt-0.5">
+                {result.output}
+              </span>
+            ))}
+        </div>
+      )}
+    </section>
+  );
 
   return (
     <div className="h-screen flex flex-col bg-gray-50">
@@ -85,12 +142,12 @@ function App() {
         </div>
       </header>
 
-      {error && (
+      {(error || caches.error) && (
         <div className="bg-red-50 border-b border-red-200 px-6 py-3 flex items-center justify-between gap-4">
-          <span className="text-red-700 text-sm">{error}</span>
+          <span className="text-red-700 text-sm">{error ?? caches.error}</span>
           <button
             type="button"
-            onClick={cleanup.clearError}
+            onClick={() => { cleanup.clearError(); caches.clearError(); }}
             className="text-red-500 hover:text-red-700"
             aria-label="Dismiss error"
           >
@@ -126,13 +183,17 @@ function App() {
 
       <main className="flex-1 overflow-y-auto p-6">
         {!scanPath ? (
-          <div className="min-h-full flex flex-col items-center justify-center text-gray-500">
-            <div className="flex items-center gap-3 mb-4">
-              <FolderIcon className="w-14 h-14 text-blue-200" />
-              <BranchIcon className="w-14 h-14 text-amber-300" />
+          <div className="space-y-6 pb-2">
+            <div className="py-10 flex flex-col items-center justify-center text-gray-500">
+              <div className="flex items-center gap-3 mb-4">
+                <FolderIcon className="w-14 h-14 text-blue-200" />
+                <BranchIcon className="w-14 h-14 text-amber-300" />
+              </div>
+              <p className="text-lg font-medium text-gray-700 mb-1">No folder selected</p>
+              <p className="text-sm">Choose a folder to scan for node_modules and merged Git worktrees</p>
+              <p className="text-sm mt-1">Developer caches below need no folder — scan them any time.</p>
             </div>
-            <p className="text-lg font-medium text-gray-700 mb-1">No folder selected</p>
-            <p className="text-sm">Choose a folder to scan for node_modules and merged Git worktrees</p>
+            {cacheSection}
           </div>
         ) : isScanning ? (
           <div className="min-h-full flex flex-col items-center justify-center text-gray-500">
@@ -171,6 +232,8 @@ function App() {
                 selectionDisabled={isDeleting || isScanning}
               />
             </section>
+
+            {cacheSection}
           </div>
         )}
       </main>
@@ -220,6 +283,17 @@ function App() {
         selectedSize={summary.totalSize}
         onConfirm={confirmDelete}
         onCancel={() => setShowConfirmDialog(false)}
+      />
+
+      <ConfirmDialog
+        isOpen={showCacheDialog}
+        title="Clean selected caches?"
+        description="Caches are re-downloaded on demand. Entries marked with an official prune command are handed to that tool, which keeps whatever is still referenced. Logs are emptied in place rather than deleted."
+        items={[{ label: 'cache targets', count: caches.selectedIds.size }]}
+        confirmLabel="Clean"
+        selectedSize={caches.selectedReclaimable}
+        onConfirm={confirmCacheCleanup}
+        onCancel={() => setShowCacheDialog(false)}
       />
     </div>
   );
