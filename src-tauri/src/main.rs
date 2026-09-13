@@ -62,10 +62,10 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|app, event| {
+    app.run(|app, event| match event {
         // Bringing the window forward has to wait for the event loop: doing it during `setup`
         // while the app is switching to the Accessory policy leaves the window minimized.
-        if let RunEvent::Ready = event {
+        RunEvent::Ready => {
             let hidden = app
                 .try_state::<SettingsStore>()
                 .map(|store| store.snapshot().hide_dock)
@@ -75,10 +75,18 @@ fn main() {
             }
         }
 
+        // Closing the window only hides it, so the Dock icon would otherwise be inert and the
+        // tray the only way back in. This is the gesture people actually reach for.
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen {
+            has_visible_windows: false,
+            ..
+        } => tray::show_main_window(app),
+
         // `code: None` is the user closing the last window; `Some` is our own `app.exit(0)` from
         // the tray's Quit. Preventing both would leave a process nothing could stop.
-        if let RunEvent::ExitRequested { code: None, api, .. } = event {
-            api.prevent_exit();
-        }
+        RunEvent::ExitRequested { code: None, api, .. } => api.prevent_exit(),
+
+        _ => {}
     });
 }
