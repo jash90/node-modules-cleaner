@@ -124,7 +124,34 @@ jobs:
             Desktop application for reclaiming disk space from `node_modules` folders,
             merged Git worktrees, and shared developer caches.
 
-            ### Menu bar mode
+            ### A background refresh that stops re-deriving what it already knows
+            - The menu bar count used to recompute everything from scratch every fifteen minutes.
+              On a folder of 93 repositories with 44 linked worktrees that was 590 `git` processes
+              and 12.5 seconds, every time, whether or not a commit had moved since the last run
+            - Merge verdicts are now cached between refreshes and keyed on the commits they depend
+              on — the worktree's HEAD and its base branch tips. Deciding a branch is *not* merged
+              is the expensive half, around thirty processes, and those are exactly the branches
+              that stay on disk for months, so the negative answers are cached too
+            - Whether a worktree is dirty is deliberately never cached: files change without any
+              ref moving, so that is still read fresh each refresh, for matched worktrees only
+            - Base branches resolve in one `for-each-ref` instead of up to nine probes per
+              repository, and a linked worktree is now recognised by reading its `.git` file
+              rather than asking Git to resolve every discovered directory
+            - Size and modification time come from one walk of a tree instead of two
+            - Measured on the same folder: **590 `git` processes and 12.5s per refresh before,
+              109 and about 5s after**, with byte-identical results
+            - The refresh no longer writes anything. `git status` was rewriting `.git/index` in
+              every repository it touched, and the squash probe built and destroyed a scratch
+              directory around every single probe — verified as zero writes across 90 repositories
+            - Git run for the menu bar is niced so it yields to whatever you are doing. macOS's
+              background class was tried and rejected: it throttles disk I/O too, which turns a
+              twelve-second refresh into a ten-minute one as soon as the work writes
+            - Settings shows what the last few refreshes cost — duration, processes started, cache
+              hits — since a job that runs unattended is otherwise invisible when it regresses
+            - Fetching during a full scan is capped at eight repositories at a time instead of
+              opening one connection per repository at once
+
+            ### Menu bar mode (1.4.0)
             - Hide the Dock icon and run as a menu bar app (macOS); closing the window leaves the
               app in the menu bar rather than quitting it, and **Quit** in the tray menu ends it
             - Live readout of free disk space and worktrees ready to be removed, for a list of
