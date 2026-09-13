@@ -124,7 +124,29 @@ jobs:
             Desktop application for reclaiming disk space from `node_modules` folders,
             merged Git worktrees, and shared developer caches.
 
-            ### Features
+            ### Merged worktree detection, reworked
+            - Compare against every base branch a repository has — `origin/HEAD` plus
+              `origin/main`, `origin/master`, `origin/development` and `origin/develop` —
+              instead of `origin/HEAD` alone, which reported work merged into a second
+              integration branch as still open
+            - Detect squash merges, GitHub's default, which never make a branch an ancestor
+              of its base. The probe writes into a scratch object directory and leaves the
+              repository's object database untouched
+            - Refresh remote-tracking refs before comparing, with no credential prompts and a
+              hard timeout, so a branch merged an hour ago is not reported as open
+            - Include worktrees with a detached HEAD; never offer one that holds a base branch
+            - Report registrations whose directory is gone as stale and clear them with
+              `git worktree prune`, instead of mislabelling them as having uncommitted changes
+            - Tell untracked OS and watcher noise (`.DS_Store`, `.watchman-cookie-*`) apart
+              from real changes: it is what makes Git refuse, so removal retries once with a
+              single `-f` — never two, which is what bypassing a lock would need
+            - Refuse a worktree that gained a commit after the scan, and say which of
+              "already removed", "changed since scan", "no longer registered" and
+              "no longer merged" actually happened
+            - Collapse linked worktrees to one entry per real repository, so a directory of
+              twenty worktrees is inspected once rather than twenty times
+
+            ### Also in the app
             - Scan directories for `node_modules` folders and merged Git worktrees
             - Scan shared developer caches — npm, pnpm, bun, yarn, uv, Gradle, puppeteer, nvm
             - Detect pnpm stores abandoned when the tool moved its default location
