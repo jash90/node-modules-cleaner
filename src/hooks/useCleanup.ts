@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useMergedWorktrees } from './useMergedWorktrees';
 import { useNodeModules } from './useNodeModules';
@@ -112,6 +113,9 @@ export function useCleanup() {
     } finally {
       deletionInProgress.current = false;
       setIsCoordinatingDeletion(false);
+      // The menu bar counts are now stale by definition; a failed refresh is not worth
+      // surfacing, since the next scheduled tick corrects it anyway.
+      void invoke('refresh_tray_now').catch(() => {});
     }
   }, [
     isDeleting,

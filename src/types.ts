@@ -123,6 +123,14 @@ export interface WorktreeDeleteResult {
   error: string | null;
 }
 
+/** Persisted across runs, unlike everything else in this app. */
+export interface Settings {
+  /** macOS only; stored but inert elsewhere. */
+  hide_dock: boolean;
+  /** Folders the menu bar counts worktrees and free space for. */
+  watched_folders: string[];
+}
+
 export type SortField = 'name' | 'size' | 'manager';
 export type SortDirection = 'asc' | 'desc';
 

@@ -34,6 +34,7 @@ A fast, cross-platform desktop application that reclaims disk space from `node_m
 - **Package Manager Detection** — Detects npm, yarn, pnpm, or bun based on lock files
 - **Selective Deletion** — Choose exactly which folders to remove with checkboxes
 - **Merged Worktree Cleanup** — Finds worktrees already merged into any of a repository's base branches, including squash merges, protects dirty worktrees, and removes them without deleting branches
+- **Menu Bar Mode** — Hide the Dock icon and keep a live count of removable worktrees and free disk space in the menu bar
 - **Sorting & Filtering** — Sort by name, size, or package manager
 - **Cross-Platform** — Native apps for Windows, macOS, and Linux
 - **Lightweight** — Small binary size thanks to Tauri architecture
@@ -101,6 +102,24 @@ Beyond a plain ancestry check, a branch also counts as merged when its content i
 Worktrees with a detached HEAD are included; a worktree that holds a base branch itself never is. Registrations whose directory is already gone are reported as stale and cleared with `git worktree prune` rather than being mislabelled as having uncommitted changes.
 
 Removal is refused when there are uncommitted changes, when Git has locked the worktree, or when the worktree gained a commit after the scan. Untracked OS and watcher noise (`.DS_Store`, `.watchman-cookie-*`) is reported separately from real changes: it is what makes `git worktree remove` refuse, so removal retries once with a single `-f` after re-reading the worktree — never two, which is what would be needed to bypass a lock. Git branches are kept.
+
+### Menu bar mode
+
+Settings (the gear in the header) hold the only two things this app remembers between runs: whether
+the Dock icon is hidden, and which folders the menu bar watches. For each watched folder the tray
+shows the free space on the volume that folder actually lives on — matched by longest mount point,
+so a folder on an external disk reports that disk and not the boot volume — and how many worktrees
+are ready to be removed right now. That count comes from the same merge detection the main window
+uses, minus the fetch and the size walk, so the background refresh never touches the network and
+never crawls `node_modules`. It updates every 15 minutes, on **Refresh now**, and after a cleanup.
+
+Closing the window leaves the app running in the menu bar; **Quit** in the tray menu ends it.
+
+Platform differences worth knowing: hiding the Dock icon is macOS-only, since that is the only
+platform with a Dock. The text beside the tray icon is unsupported on Windows and depends on the
+desktop environment on Linux — the menu itself carries the same information everywhere. On Linux
+the tray needs `libayatana-appindicator3` (or the older `libappindicator3`) at runtime; the `.deb`
+declares it, and if it is missing the app still starts, just without the tray.
 
 ## Build from Source
 

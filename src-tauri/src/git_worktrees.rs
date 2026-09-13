@@ -976,6 +976,41 @@ fn scan_for_merged_worktrees_in(scan_path: &Path) -> Result<WorktreeScanResult, 
     })
 }
 
+/// How many worktrees under `root` are ready to be removed right now.
+///
+/// This is the number the menu bar shows, and it deliberately goes through the same
+/// `collect_merged_worktrees` the window uses, so the two can never disagree. It skips the two
+/// expensive steps of a full scan: no `fetch_repository` (a background tick must not touch the
+/// network) and no `calculate_dir_size` (walking `node_modules` is by far the slowest part and a
+/// count does not need bytes).
+pub(crate) fn count_removable_worktrees(root: &Path) -> usize {
+    if !root.is_dir() {
+        return 0;
+    }
+
+    let mut seen = HashSet::new();
+    let mut removable = 0;
+
+    for (repository, resolvable) in unique_repositories(discover_git_repositories(root)) {
+        if !resolvable {
+            continue;
+        }
+        let Ok(candidates) = collect_merged_worktrees(&repository) else {
+            continue;
+        };
+        for candidate in candidates {
+            if !seen.insert((candidate.repository_path.clone(), candidate.path.clone())) {
+                continue;
+            }
+            if !candidate.is_dirty && !candidate.is_locked && candidate.state != STATE_STALE {
+                removable += 1;
+            }
+        }
+    }
+
+    removable
+}
+
 #[tauri::command]
 pub async fn scan_for_merged_worktrees(path: String) -> Result<WorktreeScanResult, String> {
     scan_for_merged_worktrees_in(Path::new(&path))
@@ -1089,7 +1124,8 @@ fn delete_merged_worktrees_in(removals: Vec<WorktreeRemoval>) -> Vec<WorktreeDel
 mod tests {
     use super::{
         classify_status_output, collect_merged_worktrees,
-        delete_merged_worktrees_in, find_base_branches, is_ancestor, is_junk_entry,
+        count_removable_worktrees, delete_merged_worktrees_in, find_base_branches, is_ancestor,
+        is_junk_entry,
         is_squash_merged, parse_worktree_porcelain, remove_merged_worktree,
         scan_for_merged_worktrees_in, WorktreeRemoval,
     };
@@ -1823,6 +1859,52 @@ mod tests {
 
         assert!(candidates.is_empty());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn the_menu_bar_count_includes_only_worktrees_that_can_actually_be_removed() {
+        let id = TEST_REPO_ID.fetch_add(1, Ordering::Relaxed);
+        let scan_root = std::env::temp_dir().join(format!(
+            "node-modules-cleaner-count-test-{}-{id}",
+            std::process::id()
+        ));
+        let repo = TestRepo::new_at(scan_root.join("sample-repo"));
+
+        let removable = repo.add_feature_worktree("feature/removable");
+        repo.git(&["merge", "--ff-only", "feature/removable"]);
+
+        let dirty = repo.add_feature_worktree("feature/dirty");
+        repo.git(&["merge", "--ff-only", "feature/dirty"]);
+        fs::write(dirty.join("work-in-progress.txt"), "keep me\n").expect("write dirty fixture");
+
+        let locked = repo.add_feature_worktree("feature/locked");
+        repo.git(&["merge", "--ff-only", "feature/locked"]);
+        repo.git(&[
+            "worktree",
+            "lock",
+            locked.to_str().expect("UTF-8 fixture path"),
+        ]);
+
+        let stale = repo.add_feature_worktree("feature/stale");
+        repo.git(&["merge", "--ff-only", "feature/stale"]);
+        fs::remove_dir_all(&stale).expect("simulate a hand-deleted worktree directory");
+
+        let open = repo.add_feature_worktree("feature/open");
+        repo.commit_file(&open, "open.txt");
+
+        // Five merged-or-not worktrees, exactly one of which the app would actually remove.
+        assert_eq!(count_removable_worktrees(&scan_root), 1);
+        assert!(removable.exists());
+
+        drop(repo);
+        let _ = fs::remove_dir_all(scan_root);
+    }
+
+    #[test]
+    fn the_menu_bar_count_is_zero_for_a_folder_that_is_not_there() {
+        let missing = std::env::temp_dir().join("node-modules-cleaner-definitely-missing");
+
+        assert_eq!(count_removable_worktrees(&missing), 0);
     }
 
     /// Print what the scan finds on the machine it runs on, against a real directory tree.

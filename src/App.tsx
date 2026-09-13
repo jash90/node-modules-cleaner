@@ -7,6 +7,8 @@ import { CacheList } from './components/CacheList';
 import { SortControls } from './components/SortControls';
 import { SizeDisplay } from './components/SizeDisplay';
 import { ConfirmDialog } from './components/ConfirmDialog';
+import { SettingsPanel } from './components/SettingsPanel';
+import { useSettings } from './hooks/useSettings';
 import { formatSize } from './utils/formatSize';
 
 function Spinner({ className = 'h-4 w-4' }: { className?: string }) {
@@ -37,11 +39,22 @@ function BranchIcon({ className }: { className: string }) {
   );
 }
 
+function GearIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+    </svg>
+  );
+}
+
 function App() {
   const cleanup = useCleanup();
   const caches = useDevCaches();
+  const settings = useSettings();
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
   const [showCacheDialog, setShowCacheDialog] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const {
     nodeModules,
     mergedWorktrees,
@@ -121,24 +134,35 @@ function App() {
               Find and remove node_modules and merged Git worktrees
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => void cleanup.scan()}
-            disabled={isScanning || isDeleting}
-            className="px-4 py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
-          >
-            {isScanning ? (
-              <>
-                <Spinner />
-                Scanning...
-              </>
-            ) : (
-              <>
-                <FolderIcon className="w-4 h-4" />
-                Select Folder
-              </>
-            )}
-          </button>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setShowSettings(true)}
+              aria-label="Settings"
+              title="Settings"
+              className="p-2 rounded-lg border border-gray-200 text-gray-500 hover:text-gray-900 hover:bg-gray-50 transition-colors"
+            >
+              <GearIcon className="w-5 h-5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => void cleanup.scan()}
+              disabled={isScanning || isDeleting}
+              className="px-4 py-2 bg-blue-600 text-white font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
+            >
+              {isScanning ? (
+                <>
+                  <Spinner />
+                  Scanning...
+                </>
+              ) : (
+                <>
+                  <FolderIcon className="w-4 h-4" />
+                  Select Folder
+                </>
+              )}
+            </button>
+          </div>
         </div>
       </header>
 
@@ -285,6 +309,18 @@ function App() {
           </div>
         </footer>
       )}
+
+      <SettingsPanel
+        isOpen={showSettings}
+        settings={settings.settings}
+        dockToggleAvailable={settings.dockToggleAvailable}
+        isBusy={settings.isBusy || !settings.isLoaded}
+        error={settings.error}
+        onSetHideDock={(hidden) => void settings.setHideDock(hidden)}
+        onAddFolder={() => void settings.addFolder()}
+        onRemoveFolder={(folder) => void settings.removeFolder(folder)}
+        onClose={() => setShowSettings(false)}
+      />
 
       <ConfirmDialog
         isOpen={showConfirmDialog}
