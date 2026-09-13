@@ -231,6 +231,18 @@ function App() {
                 onDeselectAll={mergedWorktrees.deselectAll}
                 selectionDisabled={isDeleting || isScanning}
               />
+              {mergedWorktrees.diagnostics.length > 0 && (
+                <details className="border-t border-amber-100 px-4 py-2">
+                  <summary className="text-xs text-gray-500 cursor-pointer select-none">
+                    Base branches compared ({mergedWorktrees.diagnostics.length} repositories)
+                  </summary>
+                  <ul className="mt-2 space-y-1">
+                    {mergedWorktrees.diagnostics.map((note) => (
+                      <li key={note} className="text-[11px] text-gray-500 break-all">{note}</li>
+                    ))}
+                  </ul>
+                </details>
+              )}
             </section>
 
             {cacheSection}
@@ -277,7 +289,7 @@ function App() {
       <ConfirmDialog
         isOpen={showConfirmDialog}
         title="Remove selected items?"
-        description="node_modules folders are deleted permanently. Worktree files, including ignored files, are removed; Git branches are kept."
+        description="node_modules folders are deleted permanently. Worktree files, including ignored files and untracked OS/watcher junk, are removed; Git branches are kept. Entries whose directory is already gone only have their leftover Git registration pruned."
         items={summary.items}
         confirmLabel="Remove"
         selectedSize={summary.totalSize}

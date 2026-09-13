@@ -78,17 +78,28 @@ export interface CacheCleanResult {
   output: string | null;
 }
 
+/** How a worktree relates to its repository's base branches. */
+export type WorktreeState = 'merged' | 'squashed' | 'stale';
+
 export interface MergedWorktree {
   path: string;
   branch: string;
   repository_path: string;
   repository_name: string;
+  /** Empty for a stale entry, which was never compared with anything. */
   base_branch: string;
   size: number;
   is_dirty: boolean;
   has_ignored_files: boolean;
   is_locked: boolean;
   lock_reason: string | null;
+  /** HEAD as of the scan, sent back on removal so the backend can spot a newer commit. */
+  head: string;
+  state: WorktreeState;
+  is_detached: boolean;
+  /** Untracked OS/watcher noise (.DS_Store, watcher cookies) — blocks Git, but is not work. */
+  junk_file_count: number;
+  stale_reason: string | null;
 }
 
 export interface WorktreeScanResult {
@@ -96,11 +107,20 @@ export interface WorktreeScanResult {
   total_size: number;
   scan_path: string;
   warnings: string[];
+  /** Non-failure notes, e.g. which base branches each repository was compared against. */
+  diagnostics: string[];
 }
 
 export interface WorktreeRemoval {
   repository_path: string;
   worktree_path: string;
+  head: string;
+}
+
+export interface WorktreeDeleteResult {
+  success: boolean;
+  path: string;
+  error: string | null;
 }
 
 export type SortField = 'name' | 'size' | 'manager';

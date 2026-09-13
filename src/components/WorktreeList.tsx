@@ -71,7 +71,7 @@ export function WorktreeList({
           <div className="min-h-44 flex flex-col items-center justify-center text-gray-500">
             <GitBranchIcon className="w-10 h-10 mb-3 text-gray-300" />
             <p className="font-medium text-gray-700">No merged worktrees found</p>
-            <p className="text-sm mt-1">Branches are compared with each repository&apos;s default branch.</p>
+            <p className="text-sm mt-1">Branches are compared with each repository&apos;s remote base branches.</p>
           </div>
         ) : (
           <ul className="divide-y divide-gray-100">
@@ -111,11 +111,28 @@ export function WorktreeList({
                         >
                           {worktree.repository_name}
                         </span>
-                        <span className="text-[11px] text-gray-400">merged into {worktree.base_branch}</span>
+                        {worktree.state === 'stale' ? (
+                          <span className="text-[11px] text-gray-400">registration only</span>
+                        ) : (
+                          <span className="text-[11px] text-gray-400">
+                            {worktree.state === 'squashed' ? 'squash-merged' : 'merged'} into {worktree.base_branch}
+                          </span>
+                        )}
+                        {worktree.is_detached && (
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 text-[10px] font-medium">
+                            detached
+                          </span>
+                        )}
                       </div>
                       <p className="text-xs text-gray-400 truncate mt-1" title={worktree.path}>
                         {worktree.path}
                       </p>
+                      {worktree.state === 'stale' && (
+                        <p className="text-xs font-medium text-amber-700 mt-1">
+                          Directory is missing{worktree.stale_reason ? ` (${worktree.stale_reason})` : ''}
+                          {' '}— removing this only prunes the leftover Git entry
+                        </p>
+                      )}
                       {worktree.is_dirty && (
                         <p className="text-xs font-medium text-amber-700 mt-1">
                           Uncommitted changes — removal disabled
@@ -129,6 +146,12 @@ export function WorktreeList({
                       {!isProtected && worktree.has_ignored_files && (
                         <p className="text-xs font-medium text-amber-700 mt-1">
                           Contains ignored files — they will also be removed
+                        </p>
+                      )}
+                      {!isProtected && worktree.junk_file_count > 0 && (
+                        <p className="text-xs font-medium text-amber-700 mt-1">
+                          {worktree.junk_file_count} untracked junk file(s) (.DS_Store, watcher cookies)
+                          {' '}— removed along with the worktree
                         </p>
                       )}
                     </div>

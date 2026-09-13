@@ -33,7 +33,7 @@ A fast, cross-platform desktop application that reclaims disk space from `node_m
 - **Top Packages Detection** — Identifies technologies used (React, Next, Vue, Express, etc.) from `package.json` and shows them as badges
 - **Package Manager Detection** — Detects npm, yarn, pnpm, or bun based on lock files
 - **Selective Deletion** — Choose exactly which folders to remove with checkboxes
-- **Merged Worktree Cleanup** — Finds worktrees whose branches are merged into the repository default, protects dirty worktrees, and removes them without deleting branches
+- **Merged Worktree Cleanup** — Finds worktrees already merged into any of a repository's base branches, including squash merges, protects dirty worktrees, and removes them without deleting branches
 - **Sorting & Filtering** — Sort by name, size, or package manager
 - **Cross-Platform** — Native apps for Windows, macOS, and Linux
 - **Lightweight** — Small binary size thanks to Tauri architecture
@@ -94,7 +94,13 @@ so you can scan and clean them straight away. Targets are grouped by kind and ea
 states how it will be cleaned: deleted, emptied in place, or handed to the owning tool's
 prune command.
 
-For linked Git worktrees, the app compares each branch with `origin/HEAD` (falling back to local `main` or `master`), disables removal when uncommitted changes are present or Git has locked the worktree, warns when ignored content will also be deleted, and uses `git worktree remove` for selected clean worktrees. Git branches are kept.
+For linked Git worktrees, the app refreshes each repository's remote-tracking refs and then compares every worktree against all of the repository's base branches — `origin/HEAD` plus `origin/main`, `origin/master`, `origin/development` and `origin/develop`, falling back to local branches only when a repository has no remote base at all. Comparing against `origin/HEAD` alone would report every branch merged into a second integration branch as still open.
+
+Beyond a plain ancestry check, a branch also counts as merged when its content is already in the base under a different history — the squash merge that GitHub performs by default. That probe writes its synthetic commit into a scratch object directory, so it never leaves objects behind in the repository.
+
+Worktrees with a detached HEAD are included; a worktree that holds a base branch itself never is. Registrations whose directory is already gone are reported as stale and cleared with `git worktree prune` rather than being mislabelled as having uncommitted changes.
+
+Removal is refused when there are uncommitted changes, when Git has locked the worktree, or when the worktree gained a commit after the scan. Untracked OS and watcher noise (`.DS_Store`, `.watchman-cookie-*`) is reported separately from real changes: it is what makes `git worktree remove` refuse, so removal retries once with a single `-f` after re-reading the worktree — never two, which is what would be needed to bypass a lock. Git branches are kept.
 
 ## Build from Source
 

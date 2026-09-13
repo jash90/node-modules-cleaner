@@ -1,9 +1,9 @@
 import { useCallback, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type {
-  DeleteResult,
   MergedWorktree,
   NodeModulesFolder,
+  WorktreeDeleteResult,
   WorktreeRemoval,
   WorktreeScanResult,
 } from '../types';
@@ -17,6 +17,7 @@ export function useMergedWorktrees() {
   const [scanPath, setScanPath] = useState<string | null>(null);
   const [totalSize, setTotalSize] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [diagnostics, setDiagnostics] = useState<string[]>([]);
 
   const scan = useCallback(async (path: string) => {
     if (isScanning || isDeleting) return;
@@ -26,6 +27,7 @@ export function useMergedWorktrees() {
     setWorktrees([]);
     setSelectedPaths(new Set());
     setTotalSize(0);
+    setDiagnostics([]);
     setScanPath(path);
 
     try {
@@ -34,8 +36,9 @@ export function useMergedWorktrees() {
       });
       setWorktrees(result.worktrees);
       setTotalSize(result.total_size);
+      setDiagnostics(result.diagnostics ?? []);
       if (result.warnings.length > 0) {
-        setError(`Skipped ${result.warnings.length} repository/repositories. ${result.warnings[0]}`);
+        setError(`${result.warnings.length} repository warning(s). ${result.warnings[0]}`);
       }
     } catch (err) {
       setError(`Worktree scan failed: ${err}`);
@@ -98,10 +101,12 @@ export function useMergedWorktrees() {
       .map((worktree) => ({
         repository_path: worktree.repository_path,
         worktree_path: worktree.path,
+        // Sent so the backend can refuse a worktree someone has committed into since the scan.
+        head: worktree.head,
       }));
 
     try {
-      const results = await invoke<DeleteResult[]>('delete_merged_worktrees', { removals });
+      const results = await invoke<WorktreeDeleteResult[]>('delete_merged_worktrees', { removals });
       const removedPaths = new Set(
         results.filter((result) => result.success).map((result) => result.path),
       );
@@ -143,6 +148,7 @@ export function useMergedWorktrees() {
     totalSize,
     selectedSize,
     error,
+    diagnostics,
     scan,
     toggleSelection,
     selectAll,
