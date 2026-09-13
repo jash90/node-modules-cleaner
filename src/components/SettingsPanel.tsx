@@ -1,4 +1,6 @@
-import type { Settings } from '../types';
+import { useEffect, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import type { Settings, TickDiagnostics } from '../types';
 
 interface SettingsPanelProps {
   isOpen: boolean;
@@ -10,6 +12,67 @@ interface SettingsPanelProps {
   onAddFolder: () => void;
   onRemoveFolder: (folder: string) => void;
   onClose: () => void;
+}
+
+// The menu bar refresh runs unattended every fifteen minutes, so the only way to notice it
+// getting slower is to record what it cost and show it somewhere. Mounted with the panel, so
+// nothing is fetched while the dialog is closed.
+function BackgroundRefresh() {
+  const [ticks, setTicks] = useState<TickDiagnostics[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void invoke<TickDiagnostics[]>('tick_diagnostics')
+      .then((result) => {
+        if (!cancelled) setTicks(result);
+      })
+      .catch(() => {
+        if (!cancelled) setTicks([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const latest = ticks?.[ticks.length - 1];
+
+  return (
+    <section className="mt-6">
+      <h4 className="font-medium text-gray-900">Background refresh</h4>
+      {!latest ? (
+        <p className="mt-2 text-xs text-gray-500">
+          {ticks === null ? 'Reading…' : 'No refresh has finished yet.'}
+        </p>
+      ) : (
+        <>
+          <p className="mt-2 text-sm text-gray-700">
+            Last run took{' '}
+            <span className="font-medium">{(latest.duration_ms / 1000).toFixed(1)} s</span> and
+            started <span className="font-medium">{latest.git_spawns}</span> Git{' '}
+            {latest.git_spawns === 1 ? 'process' : 'processes'}.
+          </p>
+          <p className="mt-0.5 text-xs text-gray-500">
+            {latest.cache_considered === 0
+              ? 'No worktrees to compare.'
+              : `${latest.cache_hits} of ${latest.cache_considered} worktrees answered from the previous run.`}
+          </p>
+          {ticks.length > 1 && (
+            <ul className="mt-2 flex flex-wrap gap-1.5">
+              {ticks.slice(-8).map((tick, index) => (
+                <li
+                  key={`${index}-${tick.duration_ms}`}
+                  className="text-[11px] tabular-nums text-gray-500 bg-gray-50 border border-gray-200 rounded px-1.5 py-0.5"
+                  title={`${tick.git_spawns} Git processes, ${tick.removable_worktrees} removable`}
+                >
+                  {(tick.duration_ms / 1000).toFixed(1)}s
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </section>
+  );
 }
 
 function shortenHome(folder: string) {
@@ -118,6 +181,8 @@ export function SettingsPanel({
             </ul>
           )}
         </section>
+
+        <BackgroundRefresh />
 
         <div className="mt-6 flex justify-end">
           <button

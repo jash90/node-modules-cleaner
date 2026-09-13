@@ -131,6 +131,15 @@ export interface Settings {
   watched_folders: string[];
 }
 
+/** What one menu bar refresh cost. Newest last. */
+export interface TickDiagnostics {
+  duration_ms: number;
+  git_spawns: number;
+  cache_hits: number;
+  cache_considered: number;
+  removable_worktrees: number;
+}
+
 export type SortField = 'name' | 'size' | 'manager';
 export type SortDirection = 'asc' | 'desc';
 

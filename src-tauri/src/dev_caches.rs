@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::fs_size::{last_modified_unix, measure_dir};
+use crate::fs_size::{measure_dir, scan_dir};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -495,13 +495,19 @@ pub(crate) fn collect_targets() -> Result<CacheScanResult, String> {
     let mut targets: Vec<CacheTarget> = candidates
         .into_par_iter()
         .map(|candidate| {
-            let size = if candidate.path.is_file() {
+            let (size, last_modified) = if candidate.path.is_file() {
                 // A single file needs no walk; its own metadata is the answer.
-                std::fs::metadata(&candidate.path)
-                    .map(|metadata| file_size_of(&metadata))
-                    .unwrap_or_default()
+                let metadata = std::fs::metadata(&candidate.path).ok();
+                (
+                    metadata
+                        .as_ref()
+                        .map(file_size_of)
+                        .unwrap_or_default(),
+                    metadata.as_ref().and_then(crate::fs_size::modified_unix),
+                )
             } else {
-                measure_dir(&candidate.path)
+                let scan = scan_dir(&candidate.path);
+                (scan.size, scan.last_modified)
             };
 
             // A prune keeps whatever is still referenced, so the directory's current size
@@ -518,7 +524,7 @@ pub(crate) fn collect_targets() -> Result<CacheScanResult, String> {
                 logical_size: size.logical,
                 allocated_size: size.allocated,
                 reclaimable_size: if delegated { 0 } else { size.reclaimable },
-                last_modified: last_modified_unix(&candidate.path),
+                last_modified,
                 safety: candidate.safety,
                 cleanup: candidate.cleanup,
                 note: candidate.note,

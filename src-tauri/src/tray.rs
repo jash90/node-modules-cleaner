@@ -6,12 +6,16 @@
 //! Platform reality, which shapes the design: `TrayIcon::set_title` is unsupported on Windows and
 //! conditional on Linux, so the title is a bonus and the *menu* carries the information everywhere.
 
-use crate::git_worktrees::count_removable_worktrees;
+use crate::git_worktrees::{
+    count_removable_worktrees, git_spawn_count, with_background_git, VerdictCache,
+};
 use crate::settings::{Settings, SettingsStore};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use sysinfo::Disks;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
@@ -28,6 +32,46 @@ const TRAY_ICON: &[u8] = include_bytes!("../icons/tray-template.png");
 
 /// Handle the commands use to ask for an out-of-band refresh.
 pub struct TrayRefresh(Sender<()>);
+
+/// How many past ticks to keep. Enough to see a trend without being a memory leak.
+const TICK_HISTORY: usize = 20;
+
+/// What one refresh cost.
+///
+/// The point of measuring rather than estimating: the tick is the only work this app does on
+/// its own, it runs unattended, and the difference between a healthy tick and a pathological
+/// one is invisible from the outside. Spawn count is the number that moves first when
+/// something regresses, because process creation — not I/O — is what this work is made of.
+#[derive(Debug, Clone, Serialize)]
+pub struct TickDiagnostics {
+    pub duration_ms: u64,
+    pub git_spawns: u64,
+    pub cache_hits: u64,
+    pub cache_considered: u64,
+    pub removable_worktrees: usize,
+}
+
+#[derive(Default)]
+pub struct TickHistory(Mutex<VecDeque<TickDiagnostics>>);
+
+impl TickHistory {
+    fn record(&self, entry: TickDiagnostics) {
+        let Ok(mut history) = self.0.lock() else {
+            return;
+        };
+        history.push_back(entry);
+        while history.len() > TICK_HISTORY {
+            history.pop_front();
+        }
+    }
+
+    fn snapshot(&self) -> Vec<TickDiagnostics> {
+        self.0
+            .lock()
+            .map(|history| history.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+}
 
 pub fn request_refresh<R: Runtime>(app: &AppHandle<R>) {
     if let Some(refresh) = app.try_state::<TrayRefresh>() {
@@ -129,13 +173,17 @@ fn display_folder(folder: &str) -> String {
     }
 }
 
-pub fn collect_stats(settings: &Settings) -> TrayStats {
+pub fn collect_stats(settings: &Settings, cache: &mut VerdictCache) -> TrayStats {
     let volumes = read_volumes();
     let mut stats = TrayStats::default();
 
+    // The pass spans every watched folder, not each one in turn: the cache forgets whatever it
+    // was not asked about, and a per-folder pass would have each folder evict the others.
+    cache.begin_pass();
+
     for folder in &settings.watched_folders {
         let path = Path::new(folder);
-        let removable = count_removable_worktrees(path);
+        let removable = count_removable_worktrees(path, cache);
         stats.removable_worktrees += removable;
         stats.folders.push(FolderStat {
             folder: folder.clone(),
@@ -160,6 +208,7 @@ pub fn collect_stats(settings: &Settings) -> TrayStats {
         }
     }
 
+    cache.end_pass();
     stats
 }
 
@@ -324,16 +373,47 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
 
     let (sender, receiver) = mpsc::channel();
     app.manage(TrayRefresh(sender));
+    app.manage(TickHistory::default());
     spawn_refresh_thread(app.clone(), receiver);
     Ok(())
 }
 
 fn spawn_refresh_thread(app: AppHandle, receiver: Receiver<()>) {
-    std::thread::spawn(move || loop {
+    std::thread::spawn(move || {
+        // The thread itself is deliberately left at normal priority: it spends its time waiting
+        // on `git`, and macOS's thread-level background class throttles I/O rather than just
+        // CPU, which this workload cannot afford. The children are deprioritised individually
+        // where they are built — thread policy would not have reached them anyway, since it
+        // does not survive `posix_spawn`.
+
+        // Outlives every tick: this is what stops the same unchanged branches from being
+        // re-probed from scratch every fifteen minutes.
+        let mut cache = VerdictCache::default();
+
+        loop {
         // Clone the settings and drop the lock before the Git work: a tick can run for tens of
         // seconds, and every settings command would queue behind a held lock.
         let settings = app.state::<SettingsStore>().snapshot();
-        let stats = collect_stats(&settings);
+        let started = Instant::now();
+        let spawns_before = git_spawn_count();
+        let stats = with_background_git(|| collect_stats(&settings, &mut cache));
+        let diagnostics = TickDiagnostics {
+            duration_ms: started.elapsed().as_millis() as u64,
+            git_spawns: git_spawn_count().saturating_sub(spawns_before),
+            cache_hits: cache.hits(),
+            cache_considered: cache.considered(),
+            removable_worktrees: stats.removable_worktrees,
+        };
+        eprintln!(
+            "tray tick: {:.1}s, {} git spawns, cache {}/{} hit",
+            diagnostics.duration_ms as f64 / 1000.0,
+            diagnostics.git_spawns,
+            diagnostics.cache_hits,
+            diagnostics.cache_considered,
+        );
+        if let Some(history) = app.try_state::<TickHistory>() {
+            history.record(diagnostics);
+        }
         apply(&app, &stats);
 
         match receiver.recv_timeout(REFRESH_INTERVAL) {
@@ -344,12 +424,22 @@ fn spawn_refresh_thread(app: AppHandle, receiver: Receiver<()>) {
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
+        }
     });
 }
 
 #[tauri::command]
 pub async fn refresh_tray_now(app: AppHandle) {
     request_refresh(&app);
+}
+
+/// The last few ticks, newest last. Surfaced in Settings so a regression in the background
+/// work is visible without attaching a terminal to a release build.
+#[tauri::command]
+pub async fn tick_diagnostics(app: AppHandle) -> Vec<TickDiagnostics> {
+    app.try_state::<TickHistory>()
+        .map(|history| history.snapshot())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

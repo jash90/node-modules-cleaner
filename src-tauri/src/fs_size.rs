@@ -139,44 +139,110 @@ fn file_facts(metadata: &std::fs::Metadata) -> FileFacts {
     }
 }
 
+/// Size and age of a tree, from one traversal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DirScan {
+    pub size: DirSize,
+    pub last_modified: Option<i64>,
+}
+
+/// How many entries to gather before stat-ing them in parallel.
+///
+/// `readdir` is sequential no matter what, but the `lstat` per entry is where the time goes and
+/// it parallelises freely. Batching keeps the walk's memory flat — a projects folder holds
+/// millions of entries and holding them all would cost more than the scan saves — while giving
+/// rayon chunks big enough to be worth scheduling.
+const STAT_CHUNK: usize = 4096;
+
 /// Measure a directory tree without crossing filesystem boundaries.
 ///
 /// Staying on one filesystem matters on macOS: simulator runtimes mount their own APFS
 /// volumes under `/Library/Developer/CoreSimulator/Volumes`, and a scan that follows them
 /// bills a foreign volume's contents to the folder being measured.
-pub fn measure_dir(path: &Path) -> DirSize {
-    WalkDir::new(path)
-        .same_file_system(true)
-        .into_iter()
-        .par_bridge()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file())
-        .filter_map(|entry| entry.metadata().ok())
-        .map(|metadata| file_facts(&metadata))
-        .fold(SizeAcc::default, |mut acc, facts| {
-            acc.add(facts);
-            acc
-        })
-        .reduce(SizeAcc::default, SizeAcc::merge)
-        .finish()
+///
+/// Size and modification time come out of the same pass. They used to be two full walks of the
+/// same tree, one per number, which on a large folder meant reading several million directory
+/// entries twice over to answer two questions about the same files.
+pub fn scan_dir(path: &Path) -> DirScan {
+    let mut walker = WalkDir::new(path).same_file_system(true).into_iter();
+    let mut totals = SizeAcc::default();
+    let mut newest: Option<i64> = None;
+    let mut batch: Vec<walkdir::DirEntry> = Vec::with_capacity(STAT_CHUNK);
+
+    loop {
+        batch.clear();
+        // Counted separately from `batch.len()`: a batch of nothing but unreadable entries is
+        // still progress, and treating it as the end of the walk would truncate the scan.
+        let mut yielded = 0usize;
+        for entry in walker.by_ref() {
+            yielded += 1;
+            if let Ok(entry) = entry {
+                batch.push(entry);
+            }
+            if yielded == STAT_CHUNK {
+                break;
+            }
+        }
+        if yielded == 0 {
+            break;
+        }
+
+        let (batch_totals, batch_newest) = batch
+            .par_iter()
+            .filter_map(|entry| {
+                entry
+                    .metadata()
+                    .ok()
+                    .map(|metadata| (entry.file_type().is_file(), metadata))
+            })
+            .fold(
+                || (SizeAcc::default(), None::<i64>),
+                |(mut totals, newest), (is_file, metadata)| {
+                    if is_file {
+                        totals.add(file_facts(&metadata));
+                    }
+                    // Directories count towards age but not towards size: a tree whose files
+                    // are old but whose folders were touched yesterday is not fresh.
+                    let seen = newer(newest, modified_unix(&metadata));
+                    (totals, seen)
+                },
+            )
+            .reduce(
+                || (SizeAcc::default(), None::<i64>),
+                |(totals, left), (other, right)| (totals.merge(other), newer(left, right)),
+            );
+
+        totals = totals.merge(batch_totals);
+        newest = newer(newest, batch_newest);
+    }
+
+    DirScan {
+        size: totals.finish(),
+        last_modified: newest,
+    }
 }
 
-/// Most recent modification time in the tree, as a Unix timestamp in seconds.
-///
-/// Age is the single most useful signal for "is this still in use" — a build directory or
-/// an app profile untouched for months is a far safer delete than its size alone suggests.
-pub fn last_modified_unix(path: &Path) -> Option<i64> {
+/// Size only, for the callers that never ask about age.
+pub fn measure_dir(path: &Path) -> DirSize {
+    scan_dir(path).size
+}
+
+fn newer(left: Option<i64>, right: Option<i64>) -> Option<i64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (left, right) => left.or(right),
+    }
+}
+
+pub(crate) fn modified_unix(metadata: &std::fs::Metadata) -> Option<i64> {
     use std::time::UNIX_EPOCH;
 
-    WalkDir::new(path)
-        .same_file_system(true)
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| entry.metadata().ok())
-        .filter_map(|metadata| metadata.modified().ok())
-        .filter_map(|time| time.duration_since(UNIX_EPOCH).ok())
+    metadata
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
         .map(|elapsed| elapsed.as_secs() as i64)
-        .max()
 }
 
 #[cfg(test)]
@@ -337,7 +403,7 @@ mod tests {
         let _cleanup = TestDirectory(root.clone());
         fs::write(root.join("a.txt"), b"a").expect("fixture write");
 
-        let stamp = last_modified_unix(&root).expect("tree has files");
+        let stamp = scan_dir(&root).last_modified.expect("tree has files");
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after Unix epoch")

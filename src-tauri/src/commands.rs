@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-use crate::fs_size::{last_modified_unix, measure_dir, DirSize};
+use crate::fs_size::{measure_dir, scan_dir, DirSize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TopPackage {
@@ -342,7 +342,8 @@ pub async fn scan_for_node_modules(path: String) -> Result<ScanResult, String> {
     let folders: Vec<NodeModulesFolder> = node_modules_paths
         .par_iter()
         .map(|path| {
-            let size = measure_dir_size(path);
+            let scan = scan_dir(path);
+            let size = scan.size;
             let parent = path.parent().unwrap_or(path);
             let top_packages = detect_top_packages(path);
             NodeModulesFolder {
@@ -350,7 +351,7 @@ pub async fn scan_for_node_modules(path: String) -> Result<ScanResult, String> {
                 size: size.logical,
                 allocated_size: size.allocated,
                 reclaimable_size: size.reclaimable,
-                last_modified: last_modified_unix(path),
+                last_modified: scan.last_modified,
                 parent_project: get_parent_project(path),
                 package_manager: detect_package_manager(parent),
                 top_packages,
@@ -396,6 +397,20 @@ fn is_owned_by_other_user(_path: &Path) -> bool {
 /// lets us remove what we can and report precisely what survived.
 pub(crate) fn remove_tree_collecting(root: &Path) -> Vec<FailedPath> {
     let mut failures = Vec::new();
+
+    // The overwhelmingly common case is that nothing is in the way, and `remove_dir_all` does
+    // it in one call rather than a `contents_first` walk that stats every entry on the way to
+    // unlinking it. The walk below is what produces the per-path report, so it is kept for
+    // exactly the case that needs it: something refused to go.
+    //
+    // This does not reduce filesystem events — every unlink is still one event either way — it
+    // removes the traversal that was paying for a report nobody needed.
+    // A missing root deliberately falls through rather than being treated as success: the walk
+    // reports it the way it always has, and this is only meant to skip work, not to change what
+    // a delete says happened.
+    if fs::remove_dir_all(root).is_ok() {
+        return failures;
+    }
 
     // contents_first so files and nested directories go before their parents.
     for entry in WalkDir::new(root).contents_first(true).into_iter() {

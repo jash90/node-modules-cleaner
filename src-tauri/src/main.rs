@@ -16,7 +16,7 @@ use settings::{
     SettingsStore,
 };
 use tauri::{Manager, RunEvent, WindowEvent};
-use tray::refresh_tray_now;
+use tray::{refresh_tray_now, tick_diagnostics};
 
 fn main() {
     let app = tauri::Builder::default()
@@ -57,7 +57,8 @@ fn main() {
             dock_toggle_available,
             add_watched_folder,
             remove_watched_folder,
-            refresh_tray_now
+            refresh_tray_now,
+            tick_diagnostics
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
