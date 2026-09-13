@@ -124,7 +124,21 @@ jobs:
             Desktop application for reclaiming disk space from `node_modules` folders,
             merged Git worktrees, and shared developer caches.
 
-            ### Merged worktree detection, reworked
+            ### Menu bar mode
+            - Hide the Dock icon and run as a menu bar app (macOS); closing the window leaves the
+              app in the menu bar rather than quitting it, and **Quit** in the tray menu ends it
+            - Live readout of free disk space and worktrees ready to be removed, for a list of
+              watched folders that now persists between runs — the app's first stored setting
+            - Free space is reported for the volume each watched folder actually lives on, matched
+              by longest mount point, so a folder on an external disk reports that disk
+            - The worktree count comes from the same merge detection the window uses, minus the
+              fetch and the size walk, so the background refresh never touches the network and
+              never crawls `node_modules`. Refreshes every 15 minutes, on demand, and after a clean
+            - Platform notes: the Dock toggle is macOS-only, tray text is unsupported on Windows
+              and desktop-dependent on Linux (the menu carries the same information everywhere),
+              and the Linux `.deb` now declares its `libayatana-appindicator3` runtime dependency
+
+            ### Merged worktree detection, reworked (1.3.0)
             - Compare against every base branch a repository has — `origin/HEAD` plus
               `origin/main`, `origin/master`, `origin/development` and `origin/develop` —
               instead of `origin/HEAD` alone, which reported work merged into a second
