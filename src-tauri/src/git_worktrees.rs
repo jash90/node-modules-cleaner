@@ -1120,14 +1120,17 @@ fn remove_prepared_worktree(
         }
         // Neither registered nor on disk: whoever removed it did exactly what was asked.
         // A directory that is still there but unregistered is not a worktree any more, and
-        // whatever it holds now is not ours to delete.
-        if !worktree.exists() {
-            return WorktreeDeleteResult {
+        // whatever it holds now is not ours to delete. An unreadable one may still be full of
+        // files — Git reads it as missing and an outside prune drops it — so it is reported,
+        // never claimed.
+        return match worktree.try_exists() {
+            Ok(false) => WorktreeDeleteResult {
                 already_gone: true,
                 ..removed(path)
-            };
-        }
-        return failed_removal(path, "No longer registered");
+            },
+            Ok(true) => failed_removal(path, "No longer registered"),
+            Err(error) => failed_removal(path, format!("Cannot read worktree: {error}")),
+        };
     };
 
     if candidate.state == STATE_STALE {
@@ -2302,6 +2305,40 @@ mod tests {
         fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).expect("unseal parent");
 
         assert!(!results[0].success);
+        assert!(!results[0].already_gone);
+        assert!(worktree.exists());
+    }
+
+    #[test]
+    fn an_unreadable_worktree_pruned_elsewhere_is_not_claimed_as_removed() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo = TestRepo::new();
+        let parent = repo.path().join("sealed-then-pruned");
+        fs::create_dir_all(&parent).expect("create parent directory");
+        repo.git(&["branch", "feature/sealed-pruned"]);
+        let worktree = parent.join("worktree");
+        repo.git(&[
+            "worktree",
+            "add",
+            worktree.to_str().expect("UTF-8 fixture path"),
+            "feature/sealed-pruned",
+        ]);
+        let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.branch == "feature/sealed-pruned")
+            .expect("sealed worktree candidate")
+            .clone();
+
+        // Git reads the unreadable directory as missing, so an outside prune drops the
+        // registration while every file is still on disk.
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o000)).expect("seal parent");
+        repo.git(&["worktree", "prune"]);
+        let results = delete_merged_worktrees_in(vec![removal(&candidate, false)]);
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).expect("unseal parent");
+
+        assert!(!results[0].success, "{:?}", results[0]);
         assert!(!results[0].already_gone);
         assert!(worktree.exists());
     }
