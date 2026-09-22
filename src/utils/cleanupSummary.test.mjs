@@ -192,3 +192,25 @@ test("finds the menu bar count for the scanned folder, ignoring a trailing slash
   assert.equal(cleanupSummary.trayCountFor(stats, "/Users/me/Projects"), 3);
   assert.equal(cleanupSummary.trayCountFor(stats, "/Users/me/Elsewhere"), null);
 });
+
+test("flags a stale list only when a fresh menu bar count disagrees after a good scan", () => {
+  const stats = { removable_worktrees: 1, folders: [{ folder: "/p", removable_worktrees: 1 }] };
+  const base = {
+    stats,
+    statsReceivedAt: 20,
+    listBuiltAt: 10,
+    scanPath: "/p",
+    windowCount: 2,
+    isBusy: false,
+    scanFailed: false,
+  };
+
+  assert.deepEqual(cleanupSummary.detectTrayMismatch(base), { trayCount: 1, windowCount: 2 });
+  assert.equal(cleanupSummary.detectTrayMismatch({ ...base, windowCount: 1 }), null);
+  // A count from before the list was rebuilt describes a different moment.
+  assert.equal(cleanupSummary.detectTrayMismatch({ ...base, statsReceivedAt: 5 }), null);
+  assert.equal(cleanupSummary.detectTrayMismatch({ ...base, isBusy: true }), null);
+  // A failed scan leaves an empty list; that is an error, not a sign that worktrees changed.
+  assert.equal(cleanupSummary.detectTrayMismatch({ ...base, scanFailed: true }), null);
+  assert.equal(cleanupSummary.detectTrayMismatch({ ...base, stats: null }), null);
+});

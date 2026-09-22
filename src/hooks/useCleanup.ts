@@ -7,10 +7,10 @@ import { useNodeModules } from './useNodeModules';
 import {
   countRemovableWorktrees,
   createCleanupSummary,
+  detectTrayMismatch,
   isSelectableWorktree,
   runCleanupDeletion,
   runCleanupScans,
-  trayCountFor,
   worktreesNeedingConsent,
 } from '../utils/cleanupSummary';
 import type { NodeModulesFolder, TrayStats } from '../types';
@@ -121,13 +121,16 @@ export function useCleanup() {
 
   // The window list is a snapshot from the last scan; the menu bar recounts every fifteen
   // minutes. When both describe the same folder and disagree, the list is the one that aged.
-  const trayCount = trayStats && scanPath && trayStats.receivedAt > listBuiltAt
-    ? trayCountFor(trayStats.stats, scanPath)
-    : null;
   const windowCount = countRemovableWorktrees(mergedWorktrees.worktrees);
-  const trayMismatch = trayCount !== null && !isScanning && !isDeleting && trayCount !== windowCount
-    ? { trayCount, windowCount }
-    : null;
+  const trayMismatch = detectTrayMismatch({
+    stats: trayStats?.stats ?? null,
+    statsReceivedAt: trayStats?.receivedAt ?? 0,
+    listBuiltAt,
+    scanPath,
+    windowCount,
+    isBusy: isScanning || isDeleting,
+    scanFailed: mergedWorktrees.scanFailed,
+  });
 
   const deleteSelected = useCallback(async () => {
     if (
