@@ -151,3 +151,44 @@ test("runs both scans for the same path even when one fails", async () => {
   assert.equal(results[0].status, "rejected");
   assert.equal(results[1].status, "fulfilled");
 });
+
+test("only a lock keeps a worktree from being selected", () => {
+  assert.equal(cleanupSummary.isSelectableWorktree({ is_locked: false, is_dirty: true }), true);
+  assert.equal(cleanupSummary.isSelectableWorktree({ is_locked: true, is_dirty: false }), false);
+});
+
+test("counts removable worktrees the way the menu bar does", () => {
+  const worktrees = [
+    { is_locked: false, is_dirty: false, state: "merged" },
+    { is_locked: false, is_dirty: true, state: "squashed" },
+    { is_locked: true, is_dirty: false, state: "merged" },
+    { is_locked: false, is_dirty: false, state: "stale" },
+  ];
+
+  assert.equal(cleanupSummary.countRemovableWorktrees(worktrees), 2);
+});
+
+test("asks for consent only for selected worktrees that hold uncommitted changes", () => {
+  const worktrees = [
+    { path: "/wt/clean", is_dirty: false },
+    { path: "/wt/dirty", is_dirty: true },
+  ];
+
+  assert.deepEqual(
+    cleanupSummary.worktreesNeedingConsent(worktrees).map((worktree) => worktree.path),
+    ["/wt/dirty"],
+  );
+});
+
+test("finds the menu bar count for the scanned folder, ignoring a trailing slash", () => {
+  const stats = {
+    removable_worktrees: 5,
+    folders: [
+      { folder: "/Users/me/Projects/", removable_worktrees: 3 },
+      { folder: "/Users/me/Other", removable_worktrees: 2 },
+    ],
+  };
+
+  assert.equal(cleanupSummary.trayCountFor(stats, "/Users/me/Projects"), 3);
+  assert.equal(cleanupSummary.trayCountFor(stats, "/Users/me/Elsewhere"), null);
+});

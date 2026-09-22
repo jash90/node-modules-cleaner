@@ -19,12 +19,16 @@ use std::time::{Duration, Instant};
 use sysinfo::Disks;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 /// Counting worktrees shells out to Git once per repository, so this is paced for a background
 /// task rather than for a live readout. Anything the user wants sooner comes through `Refresh now`.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const TRAY_ID: &str = "main";
+
+/// Sent to the window after every refresh, so it can tell when its own list — a snapshot taken
+/// whenever someone last pressed Scan — no longer matches what the menu bar is showing.
+pub const TRAY_STATS_EVENT: &str = "tray-stats";
 
 /// Monochrome template image, embedded rather than bundled as a resource so there is no runtime
 /// path to get wrong. macOS recolours it for light/dark and dims it on click.
@@ -236,7 +240,7 @@ fn tray_tooltip(stats: &TrayStats) -> String {
         return "Node Modules Cleaner — no folders watched".to_string();
     }
     format!(
-        "Node Modules Cleaner — {} worktree(s) ready to clean in {} folder(s)",
+        "Node Modules Cleaner — {} removable worktree(s) in {} folder(s)",
         stats.removable_worktrees,
         stats.folders.len()
     )
@@ -258,7 +262,7 @@ fn volume_label(volume: &VolumeSpace) -> String {
 fn folder_label(folder: &FolderStat) -> String {
     let count = folder.removable_worktrees;
     format!(
-        "{} — {count} worktree{} ready to clean",
+        "{} — {count} removable worktree{}",
         display_folder(&folder.folder),
         if count == 1 { "" } else { "s" }
     )
@@ -415,6 +419,8 @@ fn spawn_refresh_thread(app: AppHandle, receiver: Receiver<()>) {
             history.record(diagnostics);
         }
         apply(&app, &stats);
+        // Nobody listening is fine: the window may be closed, or not built yet at launch.
+        let _ = app.emit(TRAY_STATS_EVENT, &stats);
 
         match receiver.recv_timeout(REFRESH_INTERVAL) {
             Ok(()) => {
@@ -540,11 +546,11 @@ mod tests {
             folder: "/Users/x/Projects".to_string(),
             removable_worktrees: 1,
         })
-        .ends_with("1 worktree ready to clean"));
+        .ends_with("1 removable worktree"));
         assert!(folder_label(&FolderStat {
             folder: "/Users/x/Projects".to_string(),
             removable_worktrees: 0,
         })
-        .ends_with("0 worktrees ready to clean"));
+        .ends_with("0 removable worktrees"));
     }
 }

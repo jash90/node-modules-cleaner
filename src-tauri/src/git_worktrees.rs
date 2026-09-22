@@ -172,6 +172,11 @@ pub struct WorktreeRemoval {
     /// HEAD as of the scan. Optional so an older frontend still round-trips.
     #[serde(default)]
     pub head: String,
+    /// The user agreed to lose this worktree's uncommitted changes. Sent only for rows that were
+    /// already dirty at scan time: a worktree that went dirty afterwards was never shown to anyone
+    /// as dirty, so nobody consented to losing that work, and it is still refused.
+    #[serde(default)]
+    pub force: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -179,6 +184,11 @@ pub struct WorktreeDeleteResult {
     pub success: bool,
     pub path: String,
     pub error: Option<String>,
+    /// Removed by something else between the scan and this call. The goal is reached, so this
+    /// counts as success: other sessions on the same machine routinely clean up after a merge,
+    /// and reporting their work as our failure left the row stuck in the list forever.
+    #[serde(default)]
+    pub already_gone: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1035,6 +1045,16 @@ fn failed_removal(path: String, error: impl Into<String>) -> WorktreeDeleteResul
         success: false,
         path,
         error: Some(error.into()),
+        already_gone: false,
+    }
+}
+
+fn removed(path: String) -> WorktreeDeleteResult {
+    WorktreeDeleteResult {
+        success: true,
+        path,
+        error: None,
+        already_gone: false,
     }
 }
 
@@ -1061,10 +1081,15 @@ fn run_worktree_remove(repository: &Path, worktree: &Path, force: bool) -> Resul
 /// The scan is a snapshot, not the truth: another session can commit into a worktree or remove
 /// it entirely between the scan and this call, so everything that decides safety is re-read
 /// here and each outcome is reported distinctly.
+///
+/// `force` is the user's consent to lose uncommitted changes. It is deliberately narrow: it
+/// never outweighs a newer commit, a lock, or a worktree that is no longer merged, because the
+/// warning the user agreed to described none of those.
 fn remove_prepared_worktree(
     repository: &Path,
     worktree: &Path,
     expected_head: Option<&str>,
+    force: bool,
     candidates: &[MergedWorktree],
 ) -> WorktreeDeleteResult {
     let path = worktree.to_string_lossy().to_string();
@@ -1080,14 +1105,19 @@ fn remove_prepared_worktree(
     }
 
     let Some(candidate) = find_candidate(candidates, worktree) else {
-        return failed_removal(
-            path,
-            if is_registered(repository, worktree) {
-                "No longer merged into the repository's base branches"
-            } else {
-                "No longer registered"
-            },
-        );
+        if is_registered(repository, worktree) {
+            return failed_removal(path, "No longer merged into the repository's base branches");
+        }
+        // Neither registered nor on disk: whoever removed it did exactly what was asked.
+        // A directory that is still there but unregistered is not a worktree any more, and
+        // whatever it holds now is not ours to delete.
+        if !worktree.exists() {
+            return WorktreeDeleteResult {
+                already_gone: true,
+                ..removed(path)
+            };
+        }
+        return failed_removal(path, "No longer registered");
     };
 
     if candidate.state == STATE_STALE {
@@ -1095,7 +1125,10 @@ fn remove_prepared_worktree(
     }
 
     let Ok(requested_path) = worktree.canonicalize() else {
-        return failed_removal(path, "Already removed (by another process)");
+        return WorktreeDeleteResult {
+            already_gone: true,
+            ..removed(path)
+        };
     };
 
     if candidate.is_locked {
@@ -1108,30 +1141,21 @@ fn remove_prepared_worktree(
     }
 
     let status = worktree_status(worktree);
-    if status.is_dirty {
+    if status.is_dirty && !force {
         return failed_removal(path, "Worktree has uncommitted changes");
     }
 
     match run_worktree_remove(repository, &requested_path, false) {
-        Ok(()) => WorktreeDeleteResult {
-            success: true,
-            path,
-            error: None,
-        },
+        Ok(()) => removed(path),
         Err(error) => {
             // Untracked junk makes git refuse, and a watcher cookie can appear between the
             // status read above and the removal. Re-read rather than trusting either snapshot:
-            // force only when nothing but ignored content and junk is actually present.
-            let fresh = worktree_status(worktree);
-            if fresh.is_dirty {
+            // without consent, force only when nothing but ignored content and junk is present.
+            if !force && worktree_status(worktree).is_dirty {
                 return failed_removal(path, error);
             }
             match run_worktree_remove(repository, &requested_path, true) {
-                Ok(()) => WorktreeDeleteResult {
-                    success: true,
-                    path,
-                    error: None,
-                },
+                Ok(()) => removed(path),
                 Err(force_error) => failed_removal(path, force_error),
             }
         }
@@ -1149,11 +1173,7 @@ fn prune_stale_worktree(repository: &Path, worktree: &Path) -> WorktreeDeleteRes
     if is_registered(repository, worktree) {
         failed_removal(path, "Git did not prune this stale worktree entry")
     } else {
-        WorktreeDeleteResult {
-            success: true,
-            path,
-            error: None,
-        }
+        removed(path)
     }
 }
 
@@ -1163,7 +1183,7 @@ fn prune_stale_worktree(repository: &Path, worktree: &Path) -> WorktreeDeleteRes
 #[cfg(test)]
 fn remove_merged_worktree(repository: &Path, worktree: &Path) -> WorktreeDeleteResult {
     match collect_merged_worktrees(repository, None) {
-        Ok(candidates) => remove_prepared_worktree(repository, worktree, None, &candidates),
+        Ok(candidates) => remove_prepared_worktree(repository, worktree, None, false, &candidates),
         Err(error) => failed_removal(worktree.to_string_lossy().to_string(), error),
     }
 }
@@ -1330,7 +1350,7 @@ fn scan_for_merged_worktrees_in(scan_path: &Path) -> Result<WorktreeScanResult, 
     worktrees.sort_by_key(|worktree| Reverse(worktree.size));
     let total_size = worktrees
         .iter()
-        .filter(|worktree| !worktree.is_dirty && !worktree.is_locked)
+        .filter(|worktree| is_selectable(worktree))
         .map(|worktree| worktree.size)
         .sum();
 
@@ -1345,10 +1365,25 @@ fn scan_for_merged_worktrees_in(scan_path: &Path) -> Result<WorktreeScanResult, 
     })
 }
 
-/// How many worktrees under `root` are ready to be removed right now.
+/// Whether the window lets someone tick this row. A lock is the one thing that rules it out:
+/// it is an explicit "hands off" left by a person or tool, whereas uncommitted changes are
+/// offered behind a warning the user has to accept.
+fn is_selectable(worktree: &MergedWorktree) -> bool {
+    !worktree.is_locked
+}
+
+/// What the menu bar counts: every row the window would let you select, minus stale entries,
+/// which free nothing and are only leftover Git bookkeeping. `useCleanup.ts` mirrors this rule
+/// to notice when its list and the menu bar disagree, so the two must change together.
+fn counts_as_removable(worktree: &MergedWorktree) -> bool {
+    is_selectable(worktree) && worktree.state != STATE_STALE
+}
+
+/// How many worktrees under `root` can be removed right now — some of them only after the user
+/// accepts losing their uncommitted changes.
 ///
 /// This is the number the menu bar shows, and it deliberately goes through the same
-/// `collect_merged_worktrees` the window uses, so the two can never disagree. It skips the two
+/// `collect_merged_worktrees` and the same [`counts_as_removable`] rule the window uses. It skips the two
 /// expensive steps of a full scan: no `fetch_repository` (a background tick must not touch the
 /// network) and no `calculate_dir_size` (walking `node_modules` is by far the slowest part and a
 /// count does not need bytes).
@@ -1371,7 +1406,7 @@ pub(crate) fn count_removable_worktrees(root: &Path, cache: &mut VerdictCache) -
             if !seen.insert((candidate.repository_path.clone(), candidate.path.clone())) {
                 continue;
             }
-            if !candidate.is_dirty && !candidate.is_locked && candidate.state != STATE_STALE {
+            if counts_as_removable(&candidate) {
                 removable += 1;
             }
         }
@@ -1443,6 +1478,7 @@ fn delete_merged_worktrees_in(removals: Vec<WorktreeRemoval>) -> Vec<WorktreeDel
                 &repository,
                 worktree,
                 Some(&removal.head),
+                removal.force,
                 &candidates,
             );
             removed_any |= result.success;
@@ -1459,11 +1495,7 @@ fn delete_merged_worktrees_in(removals: Vec<WorktreeRemoval>) -> Vec<WorktreeDel
             let worktree = Path::new(&removals[index].worktree_path);
             let pruned = !is_registered(&repository, worktree);
             results[index] = Some(if pruned {
-                WorktreeDeleteResult {
-                    success: true,
-                    path: removals[index].worktree_path.clone(),
-                    error: None,
-                }
+                removed(removals[index].worktree_path.clone())
             } else {
                 failed_removal(
                     removals[index].worktree_path.clone(),
@@ -1808,7 +1840,8 @@ mod tests {
             .expect("dirty worktree");
         assert!(!clean.is_dirty);
         assert!(dirty.is_dirty);
-        assert_eq!(result.total_size, clean.size);
+        // Dirty worktrees can be removed with consent, so they count towards what is reclaimable.
+        assert_eq!(result.total_size, clean.size + dirty.size);
         assert_eq!(
             Path::new(&clean.path),
             clean_worktree
@@ -2114,6 +2147,7 @@ mod tests {
             repository_path: candidates[0].repository_path.clone(),
             worktree_path: candidates[0].path.clone(),
             head: candidates[0].head.clone(),
+            force: false,
         }]);
 
         assert_eq!(results.len(), 1);
@@ -2184,6 +2218,7 @@ mod tests {
             repository_path: candidates[0].repository_path.clone(),
             worktree_path: candidates[0].path.clone(),
             head: candidates[0].head.clone(),
+            force: false,
         }]);
 
         assert!(!results[0].success);
@@ -2195,18 +2230,144 @@ mod tests {
     }
 
     #[test]
-    fn reports_an_unregistered_worktree_distinctly_from_an_unmerged_one() {
+    fn treats_a_worktree_removed_elsewhere_as_already_gone() {
         let repo = TestRepo::new();
-        let missing = repo.path().join("never-existed");
+        let worktree = repo.add_feature_worktree("feature/removed-elsewhere");
+        repo.git(&["merge", "--ff-only", "feature/removed-elsewhere"]);
+        let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
+        assert_eq!(candidates.len(), 1);
+
+        // Another session removes it between the scan and the click — on a machine where agents
+        // clean up after every merge this is the normal case, not an edge case.
+        repo.git(&[
+            "worktree",
+            "remove",
+            worktree.to_str().expect("UTF-8 fixture path"),
+        ]);
+
+        let results = delete_merged_worktrees_in(vec![removal(&candidates[0], false)]);
+
+        assert!(results[0].success, "{}", results[0].error.clone().unwrap_or_default());
+        assert!(results[0].already_gone);
+        assert_eq!(results[0].error, None);
+    }
+
+    #[test]
+    fn still_refuses_an_unregistered_directory_that_exists() {
+        let repo = TestRepo::new();
+        let bystander = repo.path().join("not-a-worktree");
+        fs::create_dir_all(&bystander).expect("create bystander directory");
+        fs::write(bystander.join("keep.txt"), "keep me\n").expect("write bystander file");
 
         let results = delete_merged_worktrees_in(vec![WorktreeRemoval {
             repository_path: repo.path().to_string_lossy().to_string(),
-            worktree_path: missing.to_string_lossy().to_string(),
+            worktree_path: bystander.to_string_lossy().to_string(),
             head: String::new(),
+            force: true,
         }]);
 
         assert!(!results[0].success);
+        assert!(!results[0].already_gone);
         assert_eq!(results[0].error.as_deref(), Some("No longer registered"));
+        assert!(bystander.join("keep.txt").exists());
+    }
+
+    #[test]
+    fn removes_a_dirty_worktree_the_user_agreed_to_lose() {
+        let repo = TestRepo::new();
+        let worktree = repo.add_feature_worktree("feature/scratch-left-behind");
+        repo.commit_file(&worktree, "done.txt");
+        repo.git(&["merge", "--ff-only", "feature/scratch-left-behind"]);
+        fs::create_dir_all(worktree.join(".pi")).expect("create agent scratch dir");
+        fs::write(worktree.join(".pi").join("session.json"), "{}\n").expect("write scratch");
+        fs::write(worktree.join("done.txt"), "edited\n").expect("modify tracked file");
+        let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
+        assert!(candidates[0].is_dirty);
+
+        let results = delete_merged_worktrees_in(vec![removal(&candidates[0], true)]);
+
+        assert!(results[0].success, "{}", results[0].error.clone().unwrap_or_default());
+        assert!(!results[0].already_gone);
+        assert!(!worktree.exists());
+        repo.git(&[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/heads/feature/scratch-left-behind",
+        ]);
+    }
+
+    #[test]
+    fn refuses_a_dirty_worktree_nobody_agreed_to_lose() {
+        let repo = TestRepo::new();
+        let worktree = repo.add_feature_worktree("feature/went-dirty");
+        repo.git(&["merge", "--ff-only", "feature/went-dirty"]);
+        let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
+        assert!(!candidates[0].is_dirty, "clean at scan time, so no consent was asked");
+
+        fs::write(worktree.join("new-work.txt"), "keep me\n").expect("write new work");
+        let results = delete_merged_worktrees_in(vec![removal(&candidates[0], false)]);
+
+        assert!(!results[0].success);
+        assert!(results[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("uncommitted changes")));
+        assert!(worktree.join("new-work.txt").exists());
+    }
+
+    #[test]
+    fn consent_to_lose_changes_never_covers_a_newer_commit() {
+        let repo = TestRepo::new();
+        let worktree = repo.add_feature_worktree("feature/committed-after");
+        repo.git(&["merge", "--ff-only", "feature/committed-after"]);
+        fs::write(worktree.join("scratch.txt"), "scratch\n").expect("write scratch");
+        let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
+        assert!(candidates[0].is_dirty);
+
+        repo.commit_file(&worktree, "new-work.txt");
+        let results = delete_merged_worktrees_in(vec![removal(&candidates[0], true)]);
+
+        assert!(!results[0].success);
+        assert!(results[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("Changed since scan")));
+        assert!(worktree.exists());
+    }
+
+    #[test]
+    fn consent_to_lose_changes_never_overrides_a_lock() {
+        let repo = TestRepo::new();
+        let worktree = repo.add_feature_worktree("feature/locked-dirty");
+        repo.git(&["merge", "--ff-only", "feature/locked-dirty"]);
+        fs::write(worktree.join("scratch.txt"), "scratch\n").expect("write scratch");
+        repo.git(&[
+            "worktree",
+            "lock",
+            "--reason",
+            "held by another tool",
+            worktree.to_str().expect("UTF-8 fixture path"),
+        ]);
+        let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
+
+        let results = delete_merged_worktrees_in(vec![removal(&candidates[0], true)]);
+
+        assert!(!results[0].success);
+        assert!(results[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("locked")));
+        assert!(worktree.join("scratch.txt").exists());
+    }
+
+    fn removal(candidate: &super::MergedWorktree, force: bool) -> WorktreeRemoval {
+        WorktreeRemoval {
+            repository_path: candidate.repository_path.clone(),
+            worktree_path: candidate.path.clone(),
+            head: candidate.head.clone(),
+            force,
+        }
     }
 
     #[test]
@@ -2264,10 +2425,11 @@ mod tests {
         let open = repo.add_feature_worktree("feature/open");
         repo.commit_file(&open, "open.txt");
 
-        // Five merged-or-not worktrees, exactly one of which the app would actually remove.
+        // Five merged-or-not worktrees. The clean one and the dirty one can both be selected in
+        // the window; the locked, stale and unmerged ones cannot, so the menu bar skips them too.
         assert_eq!(
             count_removable_worktrees(&scan_root, &mut VerdictCache::default()),
-            1
+            2
         );
         assert!(removable.exists());
 

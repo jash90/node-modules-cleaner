@@ -1,5 +1,10 @@
 import { formatSize } from '../utils/formatSize';
 
+interface ConfirmDialogWarning {
+  message: string;
+  entries: Array<{ key: string; label: string; detail: string }>;
+}
+
 interface ConfirmDialogProps {
   isOpen: boolean;
   title: string;
@@ -7,6 +12,8 @@ interface ConfirmDialogProps {
   items: Array<{ label: string; count: number }>;
   confirmLabel: string;
   selectedSize: number;
+  /** Named, not counted: consent to lose work should be given for specific things. */
+  warning?: ConfirmDialogWarning | null;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -18,6 +25,7 @@ export function ConfirmDialog({
   items,
   confirmLabel,
   selectedSize,
+  warning = null,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -34,7 +42,7 @@ export function ConfirmDialog({
       />
 
       {/* Dialog */}
-      <div className="relative bg-white rounded-xl shadow-2xl max-w-md w-full mx-4 p-6">
+      <div className="relative bg-white rounded-xl shadow-2xl max-w-lg w-full mx-4 p-6 max-h-[90vh] overflow-y-auto">
         <div className="flex items-center gap-4 mb-4">
           <div className="flex-shrink-0 w-12 h-12 rounded-full bg-red-100 flex items-center justify-center">
             <svg className="w-6 h-6 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -63,6 +71,20 @@ export function ConfirmDialog({
             <span className="font-medium text-green-600">{formatSize(selectedSize)}</span>
           </div>
         </div>
+
+        {warning && warning.entries.length > 0 && (
+          <div role="alert" className="border border-red-200 bg-red-50 rounded-lg p-4 mb-6">
+            <p className="text-sm font-semibold text-red-800 mb-2">{warning.message}</p>
+            <ul className="space-y-1.5 max-h-48 overflow-y-auto">
+              {warning.entries.map((entry) => (
+                <li key={entry.key} className="text-xs">
+                  <span className="font-medium text-red-900">{entry.label}</span>
+                  <span className="block text-red-700 truncate" title={entry.detail}>{entry.detail}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         <div className="flex gap-3">
           <button
