@@ -124,7 +124,27 @@ jobs:
             Desktop application for reclaiming disk space from `node_modules` folders,
             merged Git worktrees, and shared developer caches.
 
-            ### A background refresh that stops re-deriving what it already knows
+            ### Worktree removal that survives a busy machine
+            - Removing worktrees no longer fails on ones something else already removed. A scan is
+              a snapshot, and on a machine where agents and scripts clean up after every merge, a
+              list can be hours out of date by the time you press Remove. Those worktrees used to
+              fail with "No longer registered" and stay selected, so every later attempt failed on
+              them again; they now count as removed and leave the list. A folder that still exists
+              but is no longer a worktree is still refused and left alone
+            - Worktrees with uncommitted changes can now be selected, and **Select all** takes
+              everything except locked ones. The confirmation dialog names every worktree whose
+              changes will be lost, and removes them only once you accept that
+            - That consent is deliberately narrow: a worktree that was clean at scan time and has
+              changes by the time you click is still refused, a worktree that gained a commit is
+              always refused, and a lock is never overridden
+            - The menu bar and the window now count the same thing. The window header shows how
+              many worktrees are removable — the menu bar's number — next to the total, and the
+              menu bar says "removable" rather than "ready to clean"
+            - After every menu bar refresh the window compares its list with the menu bar's count
+              for the same folder, and when they differ says the list may be out of date and offers
+              a rescan. A **Rescan** button next to the scanned path skips the folder picker
+
+            ### A background refresh that stops re-deriving what it already knows (1.5.0)
             - The menu bar count used to recompute everything from scratch every fifteen minutes.
               On a folder of 93 repositories with 44 linked worktrees that was 590 `git` processes
               and 12.5 seconds, every time, whether or not a commit had moved since the last run
