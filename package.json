@@ -10,7 +10,8 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "tauri": "tauri",
-    "screenshots": "node scripts/screenshots.mjs"
+    "screenshots": "node scripts/screenshots.mjs",
+    "site:verify": "node scripts/verify-site.mjs"
   },
   "dependencies": {
     "@tauri-apps/plugin-dialog": "^2.6.0",

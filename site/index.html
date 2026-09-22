@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Node Modules Cleaner: odzyskaj miejsce po node_modules, worktree i cache</title>
+  <meta name="description" content="Darmowa aplikacja na Windows, macOS i Linux, która znajduje i usuwa foldery node_modules, zmergowane Git worktree oraz cache npm, pnpm, bun, yarn, uv i Gradle. Pokazuje, ile miejsca naprawdę odzyskasz.">
+  <meta name="theme-color" content="#2563eb">
+  <link rel="canonical" href="https://jash90.github.io/node-modules-cleaner/">
+  <link rel="alternate" hreflang="pl" href="https://jash90.github.io/node-modules-cleaner/">
+  <link rel="alternate" hreflang="en" href="https://jash90.github.io/node-modules-cleaner/en/">
+  <link rel="alternate" hreflang="x-default" href="https://jash90.github.io/node-modules-cleaner/en/">
+  <link rel="icon" type="image/png" sizes="32x32" href="./assets/favicon-32.png">
+  <link rel="apple-touch-icon" href="./assets/icon-256.png">
+
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Node Modules Cleaner">
+  <meta property="og:locale" content="pl_PL">
+  <meta property="og:locale:alternate" content="en_US">
+  <meta property="og:title" content="Node Modules Cleaner: odzyskaj miejsce po node_modules, worktree i cache">
+  <meta property="og:description" content="Znajduje i usuwa node_modules, zmergowane Git worktree i cache narzędzi deweloperskich. Pokazuje, ile miejsca naprawdę wróci na dysk.">
+  <meta property="og:url" content="https://jash90.github.io/node-modules-cleaner/">
+  <meta property="og:image" content="https://jash90.github.io/node-modules-cleaner/assets/og-image.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Okno Node Modules Cleaner z listą folderów node_modules i ich rozmiarami">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Node Modules Cleaner">
+  <meta name="twitter:description" content="Znajduje i usuwa node_modules, zmergowane Git worktree i cache narzędzi deweloperskich.">
+  <meta name="twitter:image" content="https://jash90.github.io/node-modules-cleaner/assets/og-image.png">
+
+  <link rel="stylesheet" href="./assets/site.css">
+  <script src="./assets/site.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Przejdź do treści</a>
+
+  <header class="site-header">
+    <div class="container">
+      <a class="brand" href="./">
+        <img src="./assets/icon-256.png" alt="" width="30" height="30">
+        Node Modules Cleaner
+      </a>
+      <nav class="site-nav" aria-label="Główna nawigacja">
+        <ul>
+          <li><a href="#problem">Problem</a></li>
+          <li><a href="#funkcje">Funkcje</a></li>
+          <li><a href="#jak-dziala">Jak to działa</a></li>
+          <li><a href="#galeria">Galeria</a></li>
+          <li><a href="#pobierz">Pobierz</a></li>
+        </ul>
+        <a class="lang-switch" href="./en/" hreflang="en" lang="en">English</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero" aria-labelledby="hero-title">
+      <div class="container">
+        <img class="hero-icon" src="./assets/icon-256.png" alt="Ikona aplikacji Node Modules Cleaner" width="88" height="88">
+        <p class="eyebrow">Darmowa aplikacja desktopowa · Windows, macOS, Linux</p>
+        <h1 id="hero-title">Odzyskaj gigabajty zajęte przez node_modules</h1>
+        <p class="lead">
+          Node Modules Cleaner w jednym skanie znajduje foldery <code>node_modules</code>,
+          zmergowane Git worktree i współdzielone cache narzędzi deweloperskich.
+          Pokazuje, ile miejsca naprawdę wróci na dysk, a nie tylko ile zajmują pliki na papierze.
+        </p>
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="https://github.com/jash90/node-modules-cleaner/releases/latest">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v11m0 0l-4-4m4 4l4-4M5 20h14"/></svg>
+            Pobierz najnowszą wersję
+          </a>
+          <a class="btn btn-secondary" href="https://github.com/jash90/node-modules-cleaner">
+            <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5a11.5 11.5 0 00-3.64 22.41c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.52-1.33-1.28-1.69-1.28-1.69-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.19 1.77 1.19 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.55-.29-5.24-1.28-5.24-5.68 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.04 0 0 .97-.31 3.17 1.18a11 11 0 015.77 0c2.2-1.49 3.17-1.18 3.17-1.18.63 1.58.23 2.75.11 3.04.74.81 1.19 1.83 1.19 3.09 0 4.41-2.69 5.38-5.25 5.67.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0012 .5z"/></svg>
+            Kod na GitHubie
+          </a>
+        </div>
+        <p class="hero-meta">Open source na licencji MIT · React + Rust (Tauri 2)</p>
+
+        <div class="window">
+          <div class="window-bar" aria-hidden="true"><span></span><span></span><span></span></div>
+          <img src="./assets/screenshots/overview-desktop.webp" width="1440" height="900" fetchpriority="high"
+               alt="Główne okno aplikacji po skanie folderu Projects: dziewięć folderów node_modules z oznaczeniem menedżera pakietów (npm, yarn, pnpm, bun), wykrytymi technologiami i rozmiarem do odzyskania; cztery zaznaczone, na dole 6,8 GB do zwolnienia.">
+        </div>
+      </div>
+    </section>
+
+    <section id="problem" class="section section-alt" aria-labelledby="problem-title">
+      <div class="container">
+        <div class="section-head">
+          <h2 id="problem-title">Dysk zapełnia się sam, po cichu</h2>
+          <p>
+            Każdy projekt JavaScript ma własne <code>node_modules</code>, każda gałąź otwarta przez
+            <code>git worktree</code> to kolejna pełna kopia repozytorium, a menedżery pakietów trzymają
+            swoje cache poza projektami. Po kilku miesiącach robią się z tego dziesiątki gigabajtów,
+            których nikt nie pilnuje.
+          </p>
+        </div>
+
+        <div class="stats">
+          <div class="stat">
+            <h3><span class="dot dot-blue" aria-hidden="true"></span>node_modules</h3>
+            <p>Zostają w projektach, których nie otwierałeś od miesięcy. Gdy wrócisz do projektu, <code>npm install</code> je odtworzy.</p>
+          </div>
+          <div class="stat">
+            <h3><span class="dot dot-amber" aria-hidden="true"></span>Zmergowane worktree</h3>
+            <p>Gałąź dawno trafiła do <code>main</code>, a jej katalog roboczy razem z zależnościami wciąż leży na dysku.</p>
+          </div>
+          <div class="stat">
+            <h3><span class="dot dot-sky" aria-hidden="true"></span>Cache narzędzi</h3>
+            <p>npm, pnpm, bun, yarn, uv, Gradle, stare przeglądarki puppeteer i wersje Node z nvm. Żyją poza projektami.</p>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <caption>Dlaczego „rozmiar folderu” często kłamie</caption>
+            <thead>
+              <tr>
+                <th scope="col">Przypadek</th>
+                <th scope="col">Co pokazuje naiwne liczenie</th>
+                <th scope="col">Ile naprawdę odzyskasz</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row"><code>node_modules</code> z pnpm lub bun</th>
+                <td>pełny rozmiar każdego pliku</td>
+                <td>prawie nic: pliki to hardlinki do wspólnego store'u, dane przetrwają usunięcie</td>
+              </tr>
+              <tr>
+                <th scope="row">Pliki rzadkie (obrazy dysków VM)</th>
+                <td>rozmiar nominalny, czasem setki GB</td>
+                <td>tylko bloki, które faktycznie zapisano</td>
+              </tr>
+              <tr>
+                <th scope="row">Pliki wyrzucone do chmury (iCloud Drive)</th>
+                <td>rozmiar nominalny</td>
+                <td>nic, bo tych bajtów nie ma na tym komputerze</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="funkcje" class="section" aria-labelledby="features-title">
+      <div class="container">
+        <div class="section-head">
+          <h2 id="features-title">Co potrafi</h2>
+          <p>Jedno okno, trzy panele i jedno potwierdzenie przed usunięciem czegokolwiek.</p>
+        </div>
+
+        <article class="feature">
+          <div class="feature-text">
+            <span class="feature-tag tag-blue">node_modules</span>
+            <h3>Szybki skan i uczciwe rozmiary</h3>
+            <p>Wskaż folder, na przykład <code>~/Projects</code>, a Rust przeskanuje go równolegle (Rayon).</p>
+            <ul>
+              <li>Każdy wiersz pokazuje, ile miejsca faktycznie wróci. Gdy rozmiar nominalny jest inny, widzisz go obok.</li>
+              <li>Menedżer pakietów rozpoznany po lockfile: npm, yarn, pnpm albo bun.</li>
+              <li>Technologie z <code>package.json</code> jako etykiety: next, react, expo, @nestjs, vue, astro i inne.</li>
+              <li>Sortowanie po nazwie, rozmiarze albo menedżerze; zaznaczanie pojedynczo lub wszystkich naraz.</li>
+            </ul>
+          </div>
+          <figure class="shot">
+            <img src="./assets/screenshots/overview-desktop.webp" width="1440" height="900" loading="lazy" decoding="async"
+                 alt="Panel node_modules posortowany po rozmiarze. Projekty z pnpm i bun pokazują mały rozmiar do odzyskania i większy rozmiar nominalny obok.">
+          </figure>
+        </article>
+
+        <article class="feature reverse">
+          <div class="feature-text">
+            <span class="feature-tag tag-amber">Git worktree</span>
+            <h3>Zmergowane worktree, także po squash merge</h3>
+            <p>
+              Aplikacja najpierw odświeża refy z remote'a, a potem porównuje każde worktree ze wszystkimi
+              gałęziami bazowymi repozytorium: <code>origin/HEAD</code>, <code>main</code>, <code>master</code>,
+              <code>development</code> i <code>develop</code>.
+            </p>
+            <ul>
+              <li>Rozpoznaje squash merge, domyślny tryb scalania na GitHubie, i nie zostawia przy tym obiektów w repozytorium.</li>
+              <li>Worktree z niezacommitowanymi zmianami albo zablokowane przez Git są chronione, nie da się ich zaznaczyć.</li>
+              <li>Wpisy, których katalog już zniknął, są czyszczone przez <code>git worktree prune</code>.</li>
+              <li>Gałęzie zostają. Usuwany jest tylko katalog roboczy.</li>
+            </ul>
+          </div>
+          <figure class="shot">
+            <img src="./assets/screenshots/worktrees-desktop.webp" width="1440" height="900" loading="lazy" decoding="async"
+                 alt="Panel Merged Git worktrees: gałęzie zmergowane i squash-zmergowane do origin/main, origin/development i origin/develop; worktree z niezacommitowanymi zmianami i zablokowane są wyszarzone; na dole lista porównanych gałęzi bazowych.">
+          </figure>
+        </article>
+
+        <article class="feature">
+          <div class="feature-text">
+            <span class="feature-tag tag-sky">Cache deweloperskie</span>
+            <h3>Cache poza projektami, bez wybierania folderu</h3>
+            <p>Te cache leżą w stałych miejscach, więc możesz je przeskanować od razu po uruchomieniu aplikacji.</p>
+            <ul>
+              <li>npm (<code>_cacache</code>, <code>_npx</code>), bun, yarn Berry i Classic, stare wersje Gradle, stare buildy puppeteer, stare wersje Node z nvm.</li>
+              <li>Porzucone store'y pnpm, które zostały po zmianie domyślnej lokalizacji, odróżnione od store'u, którego pnpm używa teraz.</li>
+              <li>Aktywny store pnpm i cache uv trafiają do ich własnego <code>prune</code>, więc to, co wciąż jest używane, zostaje.</li>
+              <li>Logi Homebrew są opróżniane w miejscu, bo usunięcie pliku otwartego przez usługę nie zwolniłoby miejsca.</li>
+              <li><strong>Select safe</strong> zaznacza tylko pozycje bezpieczne. Te do przejrzenia wybierasz świadomie.</li>
+            </ul>
+          </div>
+          <figure class="shot">
+            <img src="./assets/screenshots/caches-desktop.webp" width="1440" height="900" loading="lazy" decoding="async"
+                 alt="Panel Developer caches pogrupowany na porzucone store'y i cache menedżerów pakietów. Przy każdej pozycji widać metodę czyszczenia (delete, pnpm store prune, uv cache prune), czas od ostatniego użycia i rozmiar.">
+          </figure>
+        </article>
+
+        <article class="feature reverse">
+          <div class="feature-text">
+            <span class="feature-tag tag-gray">Bezpieczeństwo</span>
+            <h3>Jedno potwierdzenie z podsumowaniem</h3>
+            <p>
+              Zaznaczone <code>node_modules</code> i worktree usuwasz razem, po jednym potwierdzeniu,
+              które pokazuje, ile czego usuwasz i ile miejsca zwolnisz.
+            </p>
+            <ul>
+              <li>Usunięcie zostanie odrzucone, jeśli od skanu w worktree pojawił się nowy commit.</li>
+              <li>Śmieci systemowe (<code>.DS_Store</code>, cookies watchmana) są raportowane osobno, bo nie są pracą, choć blokują <code>git worktree remove</code>.</li>
+              <li>Worktree zablokowanego przez Git aplikacja nigdy nie usunie na siłę.</li>
+            </ul>
+          </div>
+          <figure class="shot">
+            <img src="./assets/screenshots/confirm-desktop.webp" width="1440" height="900" loading="lazy" decoding="async"
+                 alt="Okno potwierdzenia „Remove selected items?”: 4 foldery node_modules, 5 zmergowanych worktree, 6,8 GB do zwolnienia, przyciski Cancel i Remove.">
+          </figure>
+        </article>
+
+        <article class="feature">
+          <div class="feature-text">
+            <span class="feature-tag tag-blue">Pasek menu</span>
+            <h3>Działa w tle z paska menu</h3>
+            <p>
+              Po zamknięciu okna aplikacja zostaje w pasku menu. Dla obserwowanych folderów pokazuje wolne
+              miejsce na dysku, na którym dany folder faktycznie leży, i liczbę worktree gotowych do usunięcia.
+            </p>
+            <ul>
+              <li>Odświeża się co 15 minut, po kliknięciu <strong>Refresh now</strong> i po każdym sprzątaniu.</li>
+              <li>Odświeżanie w tle nie łączy się z siecią i nie przechodzi przez <code>node_modules</code>.</li>
+              <li>Na macOS możesz ukryć ikonę w Docku.</li>
+              <li>Ustawienia pokazują, ile trwało ostatnie odświeżenie i ile procesów Git uruchomiło.</li>
+            </ul>
+          </div>
+          <figure class="shot">
+            <img src="./assets/screenshots/settings-desktop.webp" width="1440" height="900" loading="lazy" decoding="async"
+                 alt="Panel Settings: zaznaczona opcja Hide from the Dock, dwa obserwowane foldery i sekcja Background refresh z czasem ostatnich odświeżeń.">
+          </figure>
+        </article>
+      </div>
+    </section>
+
+    <section id="jak-dziala" class="section section-alt" aria-labelledby="how-title">
+      <div class="container">
+        <div class="section-head">
+          <h2 id="how-title">Jak to działa</h2>
+          <p>Od wybrania folderu do wolnego miejsca w czterech krokach.</p>
+        </div>
+        <ol class="steps">
+          <li>
+            <h3>Wybierz folder</h3>
+            <p>Kliknij <strong>Select Folder</strong> i wskaż katalog z projektami.</p>
+          </li>
+          <li>
+            <h3>Poczekaj na skan</h3>
+            <p>Jeden skan znajduje zarówno foldery <code>node_modules</code>, jak i zmergowane worktree.</p>
+          </li>
+          <li>
+            <h3>Przejrzyj wyniki</h3>
+            <p>Najpierw <code>node_modules</code>, niżej worktree. Zaznacz to, czego nie potrzebujesz.</p>
+          </li>
+          <li>
+            <h3>Usuń zaznaczone</h3>
+            <p>Kliknij <strong>Remove Selected</strong> i potwierdź. Oba panele usuwasz za jednym razem.</p>
+          </li>
+        </ol>
+        <p class="note">
+          <strong>Cache deweloperskie</strong> nie wymagają wybierania folderu. Kliknij <strong>Scan caches</strong>,
+          przejrzyj grupy i przy każdej pozycji sprawdź, jak zostanie wyczyszczona: usunięta, opróżniona w miejscu
+          czy przekazana do <code>prune</code> narzędzia, do którego należy.
+        </p>
+      </div>
+    </section>
+
+    <section id="galeria" class="section" aria-labelledby="gallery-title">
+      <div class="container">
+        <div class="section-head">
+          <h2 id="gallery-title">Galeria</h2>
+          <p>Zrzuty z prawdziwego interfejsu aplikacji, wypełnionego fikcyjnymi projektami. Kliknij, żeby powiększyć.</p>
+        </div>
+        <ul class="gallery">
+          <li>
+            <a href="./assets/screenshots/empty-desktop.webp" data-lightbox data-caption="Ekran startowy">
+              <img src="./assets/screenshots/empty-desktop.webp" width="1440" height="900" loading="lazy" decoding="async"
+                   alt="Ekran startowy przed wybraniem folderu, z pustym panelem Developer caches i przyciskiem Scan caches.">
+              <span>Ekran startowy</span>
+            </a>
+          </li>
+          <li>
+            <a href="./assets/screenshots/overview-desktop.webp" data-lightbox data-caption="Wyniki skanu node_modules">
+              <img src="./assets/screenshots/overview-desktop.webp" width="1440" height="900" loading="lazy" decoding="async"
+                   alt="Wyniki skanu: lista folderów node_modules z rozmiarami i zaznaczeniem.">
+              <span>Wyniki skanu node_modules</span>
+            </a>
+          </li>
+          <li>
+            <a href="./assets/screenshots/worktrees-desktop.webp" data-lightbox data-caption="Zmergowane Git worktree">
+              <img src="./assets/screenshots/worktrees-desktop.webp" width="1440" height="900" loading="lazy" decoding="async"
+                   alt="Lista zmergowanych worktree z chronionymi pozycjami i porównanymi gałęziami bazowymi.">
+              <span>Zmergowane Git worktree</span>
+            </a>
+          </li>
+          <li>
+            <a href="./assets/screenshots/caches-desktop.webp" data-lightbox data-caption="Cache deweloperskie">
+              <img src="./assets/screenshots/caches-desktop.webp" width="1440" height="900" loading="lazy" decoding="async"
+                   alt="Cache deweloperskie pogrupowane według rodzaju, z metodą czyszczenia przy każdej pozycji.">
+              <span>Cache deweloperskie</span>
+            </a>
+          </li>
+          <li>
+            <a href="./assets/screenshots/confirm-desktop.webp" data-lightbox data-caption="Potwierdzenie usunięcia">
+              <img src="./assets/screenshots/confirm-desktop.webp" width="1440" height="900" loading="lazy" decoding="async"
+                   alt="Okno potwierdzenia z liczbą folderów i worktree oraz miejscem do zwolnienia.">
+              <span>Potwierdzenie usunięcia</span>
+            </a>
+          </li>
+          <li>
+            <a href="./assets/screenshots/settings-desktop.webp" data-lightbox data-caption="Ustawienia paska menu">
+              <img src="./assets/screenshots/settings-desktop.webp" width="1440" height="900" loading="lazy" decoding="async"
+                   alt="Ustawienia: ukrywanie ikony w Docku, obserwowane foldery i statystyki odświeżania w tle.">
+              <span>Ustawienia paska menu</span>
+            </a>
+          </li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="pobierz" class="section section-alt" aria-labelledby="download-title">
+      <div class="container">
+        <div class="section-head">
+          <h2 id="download-title">Pobierz albo zbuduj ze źródeł</h2>
+          <p>Gotowe instalatory są w GitHub Releases. Możesz też zbudować aplikację samodzielnie.</p>
+        </div>
+        <div class="install-grid">
+          <div class="card">
+            <h3>Instalatory</h3>
+            <ul class="downloads">
+              <li><span>Windows</span><small><code>.msi</code> · x64</small></li>
+              <li><span>macOS</span><small><code>.dmg</code> · Apple Silicon i Intel</small></li>
+              <li><span>Linux</span><small><code>.deb</code>, <code>.AppImage</code> · x64</small></li>
+            </ul>
+            <p style="margin-top:1.25rem">
+              <a class="btn btn-primary" href="https://github.com/jash90/node-modules-cleaner/releases/latest">Przejdź do najnowszego wydania</a>
+            </p>
+            <p>Aplikacja nie jest podpisana cyfrowo:</p>
+            <ul>
+              <li><strong>macOS:</strong> kliknij prawym przyciskiem → Otwórz, żeby ominąć Gatekeepera.</li>
+              <li><strong>Windows:</strong> kliknij „Więcej informacji” → „Uruchom mimo to”.</li>
+              <li><strong>Linux:</strong> ikona w zasobniku wymaga <code>libayatana-appindicator3</code> (pakiet <code>.deb</code> ją deklaruje). Bez niej aplikacja działa, tylko bez zasobnika.</li>
+            </ul>
+          </div>
+          <div class="card">
+            <h3>Budowanie ze źródeł</h3>
+            <p>Wymagania: Node.js 18+, Rust (najnowszy stable) i narzędzia systemowe dla Tauri.</p>
+            <pre><code>git clone https://github.com/jash90/node-modules-cleaner.git
+cd node-modules-cleaner
+npm install
+npm run tauri dev     # tryb deweloperski
+npm run tauri build   # instalatory w src-tauri/target/release/bundle/</code></pre>
+            <p>Zależności systemowe:</p>
+            <ul>
+              <li><strong>Linux:</strong> <code>sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf</code></li>
+              <li><strong>macOS:</strong> <code>xcode-select --install</code></li>
+              <li><strong>Windows:</strong> Visual Studio C++ Build Tools</li>
+            </ul>
+            <h3 style="margin-top:1.5rem">Stack</h3>
+            <ul class="stack" aria-label="Technologie">
+              <li>Tauri 2</li>
+              <li>Rust</li>
+              <li>Rayon</li>
+              <li>React 19</li>
+              <li>TypeScript</li>
+              <li>Vite 7</li>
+              <li>Tailwind CSS 4</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <p>© 2025 Bartłomiej Zimny · licencja <a href="https://github.com/jash90/node-modules-cleaner/blob/master/LICENSE">MIT</a></p>
+      <ul>
+        <li><a href="https://github.com/jash90/node-modules-cleaner">Repozytorium</a></li>
+        <li><a href="https://github.com/jash90/node-modules-cleaner/releases">Wydania</a></li>
+        <li><a href="https://github.com/jash90/node-modules-cleaner/issues">Zgłoś problem</a></li>
+        <li><a href="./en/" hreflang="en" lang="en">English</a></li>
+      </ul>
+    </div>
+  </footer>
+
+  <dialog class="lightbox" aria-label="Powiększony zrzut ekranu">
+    <div class="lightbox-bar">
+      <span class="lightbox-caption"></span>
+      <button type="button" class="lightbox-close">Zamknij</button>
+    </div>
+    <img alt="">
+  </dialog>
+</body>
+</html>
