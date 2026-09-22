@@ -1,14 +1,27 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import { useMergedWorktrees } from './useMergedWorktrees';
 import { useNodeModules } from './useNodeModules';
 import {
+  countRemovableWorktrees,
   createCleanupSummary,
+  isSelectableWorktree,
   runCleanupDeletion,
   runCleanupScans,
+  trayCountFor,
+  worktreesNeedingConsent,
 } from '../utils/cleanupSummary';
-import type { NodeModulesFolder } from '../types';
+import type { NodeModulesFolder, TrayStats } from '../types';
+
+/**
+ * Ask the menu bar to recount. The count doubles as a check on the window's own list, and a
+ * failed request is not worth surfacing: the next scheduled refresh arrives anyway.
+ */
+function refreshTray() {
+  void invoke('refresh_tray_now').catch(() => {});
+}
 
 export function useCleanup() {
   const nodeModules = useNodeModules();
@@ -25,6 +38,19 @@ export function useCleanup() {
   const [isCoordinatingDeletion, setIsCoordinatingDeletion] = useState(false);
   const [pickerError, setPickerError] = useState<string | null>(null);
   const deletionInProgress = useRef(false);
+  // Menu bar counts from before the list was last rebuilt describe a different moment, so only
+  // the ones that arrive afterwards are compared with it.
+  const [trayStats, setTrayStats] = useState<{ stats: TrayStats; receivedAt: number } | null>(null);
+  const [listBuiltAt, setListBuiltAt] = useState(0);
+
+  useEffect(() => {
+    const unlisten = listen<TrayStats>('tray-stats', (event) => {
+      setTrayStats({ stats: event.payload, receivedAt: Date.now() });
+    });
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, []);
 
   const isScanning = isSelectingDirectory
     || nodeModules.isScanning
@@ -49,10 +75,14 @@ export function useCleanup() {
 
   const availableSummary = useMemo(() => createCleanupSummary({
     nodeModules: nodeModules.folders,
-    worktrees: mergedWorktrees.worktrees.filter((worktree) => (
-      !worktree.is_dirty && !worktree.is_locked
-    )),
+    worktrees: mergedWorktrees.worktrees.filter(isSelectableWorktree),
   }), [mergedWorktrees.worktrees, nodeModules.folders]);
+
+  const selectedWorktreesNeedingConsent = useMemo(() => worktreesNeedingConsent(
+    mergedWorktrees.worktrees.filter((worktree) => (
+      mergedWorktrees.selectedPaths.has(worktree.path)
+    )),
+  ), [mergedWorktrees.selectedPaths, mergedWorktrees.worktrees]);
 
   const scan = useCallback(async () => {
     if (isScanning || isDeleting) return;
@@ -72,12 +102,32 @@ export function useCleanup() {
       const path = selected as string;
       setScanPath(path);
       await runCleanupScans(path, scanNodeModules, scanMergedWorktrees);
+      setListBuiltAt(Date.now());
+      refreshTray();
     } catch (err) {
       setPickerError(`Failed to open directory picker: ${err}`);
     } finally {
       setIsSelectingDirectory(false);
     }
   }, [isDeleting, isScanning, scanMergedWorktrees, scanNodeModules]);
+
+  /** Scan the same folder again, without going through the picker. */
+  const rescan = useCallback(async () => {
+    if (!scanPath || isScanning || isDeleting) return;
+    await runCleanupScans(scanPath, scanNodeModules, scanMergedWorktrees);
+    setListBuiltAt(Date.now());
+    refreshTray();
+  }, [isDeleting, isScanning, scanMergedWorktrees, scanNodeModules, scanPath]);
+
+  // The window list is a snapshot from the last scan; the menu bar recounts every fifteen
+  // minutes. When both describe the same folder and disagree, the list is the one that aged.
+  const trayCount = trayStats && scanPath && trayStats.receivedAt > listBuiltAt
+    ? trayCountFor(trayStats.stats, scanPath)
+    : null;
+  const windowCount = countRemovableWorktrees(mergedWorktrees.worktrees);
+  const trayMismatch = trayCount !== null && !isScanning && !isDeleting && trayCount !== windowCount
+    ? { trayCount, windowCount }
+    : null;
 
   const deleteSelected = useCallback(async () => {
     if (
@@ -113,9 +163,9 @@ export function useCleanup() {
     } finally {
       deletionInProgress.current = false;
       setIsCoordinatingDeletion(false);
-      // The menu bar counts are now stale by definition; a failed refresh is not worth
-      // surfacing, since the next scheduled tick corrects it anyway.
-      void invoke('refresh_tray_now').catch(() => {});
+      setListBuiltAt(Date.now());
+      // The menu bar counts are now stale by definition.
+      refreshTray();
     }
   }, [
     isDeleting,
@@ -148,8 +198,12 @@ export function useCleanup() {
     isDeleting,
     summary,
     totalSize: availableSummary.totalSize,
+    selectedWorktreesNeedingConsent,
+    trayMismatch,
+    removableWorktreeCount: windowCount,
     error,
     scan,
+    rescan,
     deleteSelected,
     clearError,
   };

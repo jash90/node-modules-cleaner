@@ -63,8 +63,12 @@ function App() {
     isDeleting,
     summary,
     totalSize,
+    selectedWorktreesNeedingConsent,
+    trayMismatch,
+    removableWorktreeCount,
     error,
   } = cleanup;
+  const needsConsent = selectedWorktreesNeedingConsent.length > 0;
 
   const confirmDelete = () => {
     setShowConfirmDialog(false);
@@ -196,12 +200,40 @@ function App() {
               <span className="font-medium text-gray-900">
                 {nodeModules.folders.length} folders + {mergedWorktrees.worktrees.length} worktrees
               </span>
+              {/* The number the menu bar shows, so the two can be compared at a glance. */}
+              <span className="text-gray-500"> ({removableWorktreeCount} removable)</span>
             </div>
             <div className="whitespace-nowrap">
               <span className="text-gray-500">Reclaimable: </span>
               <SizeDisplay bytes={totalSize} className="font-medium" />
             </div>
+            <button
+              type="button"
+              onClick={() => void cleanup.rescan()}
+              disabled={isScanning || isDeleting}
+              className="ml-auto text-xs font-medium text-blue-700 hover:text-blue-900 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Rescan
+            </button>
           </div>
+        </div>
+      )}
+
+      {trayMismatch && (
+        <div className="bg-amber-50 border-b border-amber-200 px-6 py-2.5 flex items-center justify-between gap-4 text-sm">
+          <span className="text-amber-800">
+            The menu bar counts {trayMismatch.trayCount} removable worktree
+            {trayMismatch.trayCount === 1 ? '' : 's'} here, this list shows {trayMismatch.windowCount}.
+            {' '}Worktrees changed since the last scan — this list may be out of date.
+          </span>
+          <button
+            type="button"
+            onClick={() => void cleanup.rescan()}
+            disabled={isScanning || isDeleting}
+            className="px-3 py-1 rounded-md bg-amber-600 text-white text-xs font-medium hover:bg-amber-700 disabled:opacity-50 whitespace-nowrap"
+          >
+            Rescan now
+          </button>
         </div>
       )}
 
@@ -327,8 +359,16 @@ function App() {
         title="Remove selected items?"
         description="node_modules folders are deleted permanently. Worktree files, including ignored files and untracked OS/watcher junk, are removed; Git branches are kept. Entries whose directory is already gone only have their leftover Git registration pruned."
         items={summary.items}
-        confirmLabel="Remove"
+        confirmLabel={needsConsent ? 'Remove and discard changes' : 'Remove'}
         selectedSize={summary.totalSize}
+        warning={needsConsent ? {
+          message: `${selectedWorktreesNeedingConsent.length} worktree(s) have uncommitted changes. Those changes will be lost — they are not in any commit:`,
+          entries: selectedWorktreesNeedingConsent.map((worktree) => ({
+            key: worktree.path,
+            label: `${worktree.branch} · ${worktree.repository_name}`,
+            detail: worktree.path,
+          })),
+        } : null}
         onConfirm={confirmDelete}
         onCancel={() => setShowConfirmDialog(false)}
       />

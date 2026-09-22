@@ -1,4 +1,5 @@
 import type { MergedWorktree } from '../types';
+import { isSelectableWorktree } from '../utils/cleanupSummary';
 import { SizeDisplay } from './SizeDisplay';
 
 interface WorktreeListProps {
@@ -29,7 +30,7 @@ export function WorktreeList({
   onDeselectAll,
   selectionDisabled = false,
 }: WorktreeListProps) {
-  const removable = worktrees.filter((worktree) => !worktree.is_dirty && !worktree.is_locked);
+  const removable = worktrees.filter(isSelectableWorktree);
   const allSelected = removable.length > 0
     && removable.every((worktree) => selectedPaths.has(worktree.path));
   const someSelected = removable.some((worktree) => selectedPaths.has(worktree.path));
@@ -50,7 +51,7 @@ export function WorktreeList({
               disabled={selectionDisabled}
               className="text-xs font-medium text-amber-700 hover:text-amber-900 disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              Select removable
+              Select all
             </button>
           )}
           {someSelected && (
@@ -77,7 +78,7 @@ export function WorktreeList({
           <ul className="divide-y divide-gray-100">
             {worktrees.map((worktree) => {
               const isSelected = selectedPaths.has(worktree.path);
-              const isProtected = worktree.is_dirty || worktree.is_locked || selectionDisabled;
+              const isProtected = !isSelectableWorktree(worktree) || selectionDisabled;
               return (
                 <li key={`${worktree.repository_path}:${worktree.path}`}>
                   <label
@@ -133,9 +134,9 @@ export function WorktreeList({
                           {' '}— removing this only prunes the leftover Git entry
                         </p>
                       )}
-                      {worktree.is_dirty && (
-                        <p className="text-xs font-medium text-amber-700 mt-1">
-                          Uncommitted changes — removal disabled
+                      {worktree.is_dirty && !worktree.is_locked && (
+                        <p className="text-xs font-medium text-red-700 mt-1">
+                          Uncommitted changes — lost if you remove this worktree
                         </p>
                       )}
                       {worktree.is_locked && (

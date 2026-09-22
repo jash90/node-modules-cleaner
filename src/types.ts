@@ -115,12 +115,16 @@ export interface WorktreeRemoval {
   repository_path: string;
   worktree_path: string;
   head: string;
+  /** Consent to lose uncommitted changes. Only ever true for rows that were dirty at scan time. */
+  force: boolean;
 }
 
 export interface WorktreeDeleteResult {
   success: boolean;
   path: string;
   error: string | null;
+  /** Something else removed it after the scan. Counts as success. */
+  already_gone: boolean;
 }
 
 /** Persisted across runs, unlike everything else in this app. */
@@ -129,6 +133,12 @@ export interface Settings {
   hide_dock: boolean;
   /** Folders the menu bar counts worktrees and free space for. */
   watched_folders: string[];
+}
+
+/** What the menu bar showed after its latest refresh, per watched folder. */
+export interface TrayStats {
+  folders: Array<{ folder: string; removable_worktrees: number }>;
+  removable_worktrees: number;
 }
 
 /** What one menu bar refresh cost. Newest last. */

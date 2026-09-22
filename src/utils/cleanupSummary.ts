@@ -101,3 +101,34 @@ export async function runCleanupDeletion<T, U>(
   const removedWorktrees = await deleteWorktrees();
   reconcileNodeModules(removedWorktrees);
 }
+
+/** Only a lock rules a worktree out; uncommitted changes are offered behind a warning. */
+export function isSelectableWorktree(worktree: { is_locked: boolean }): boolean {
+  return !worktree.is_locked;
+}
+
+/**
+ * Mirror of `counts_as_removable` in `git_worktrees.rs`, the rule behind the menu bar number.
+ * Stale entries are selectable but free nothing, so the menu bar leaves them out.
+ */
+export function countRemovableWorktrees(
+  worktrees: Array<{ is_locked: boolean; state: string }>,
+): number {
+  return worktrees.filter((worktree) => (
+    isSelectableWorktree(worktree) && worktree.state !== 'stale'
+  )).length;
+}
+
+export function worktreesNeedingConsent<T extends { is_dirty: boolean }>(worktrees: T[]): T[] {
+  return worktrees.filter((worktree) => worktree.is_dirty);
+}
+
+/** The menu bar's count for `scanPath`, or `null` when that folder is not watched. */
+export function trayCountFor(
+  stats: { folders: Array<{ folder: string; removable_worktrees: number }> },
+  scanPath: string,
+): number | null {
+  const target = normalizedPath(scanPath);
+  const match = stats.folders.find((entry) => normalizedPath(entry.folder) === target);
+  return match ? match.removable_worktrees : null;
+}

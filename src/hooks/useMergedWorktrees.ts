@@ -7,7 +7,7 @@ import type {
   WorktreeRemoval,
   WorktreeScanResult,
 } from '../types';
-import { adjustWorktreeSizes } from '../utils/cleanupSummary';
+import { adjustWorktreeSizes, isSelectableWorktree } from '../utils/cleanupSummary';
 
 export function useMergedWorktrees() {
   const [worktrees, setWorktrees] = useState<MergedWorktree[]>([]);
@@ -50,7 +50,7 @@ export function useMergedWorktrees() {
   const toggleSelection = useCallback((path: string) => {
     setSelectedPaths((current) => {
       const worktree = worktrees.find((item) => item.path === path);
-      if (!worktree || worktree.is_dirty || worktree.is_locked) return current;
+      if (!worktree || !isSelectableWorktree(worktree)) return current;
 
       const next = new Set(current);
       if (next.has(path)) {
@@ -65,7 +65,7 @@ export function useMergedWorktrees() {
   const selectAll = useCallback(() => {
     setSelectedPaths(new Set(
       worktrees
-        .filter((worktree) => !worktree.is_dirty && !worktree.is_locked)
+        .filter(isSelectableWorktree)
         .map((worktree) => worktree.path),
     ));
   }, [worktrees]);
@@ -84,7 +84,7 @@ export function useMergedWorktrees() {
     const updateWorktreeState = (nextWorktrees: MergedWorktree[]) => {
       setWorktrees(nextWorktrees);
       setTotalSize(nextWorktrees
-        .filter((worktree) => !worktree.is_dirty && !worktree.is_locked)
+        .filter(isSelectableWorktree)
         .reduce((total, worktree) => total + worktree.size, 0));
     };
 
@@ -103,10 +103,14 @@ export function useMergedWorktrees() {
         worktree_path: worktree.path,
         // Sent so the backend can refuse a worktree someone has committed into since the scan.
         head: worktree.head,
+        // Consent covers what the confirmation dialog listed: rows that were dirty when scanned.
+        force: worktree.is_dirty,
       }));
 
     try {
       const results = await invoke<WorktreeDeleteResult[]>('delete_merged_worktrees', { removals });
+      // Includes rows something else removed after the scan: they are gone either way, and
+      // keeping them would make every later click fail on them again.
       const removedPaths = new Set(
         results.filter((result) => result.success).map((result) => result.path),
       );

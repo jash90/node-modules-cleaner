@@ -33,7 +33,7 @@ A fast, cross-platform desktop application that reclaims disk space from `node_m
 - **Top Packages Detection** — Identifies technologies used (React, Next, Vue, Express, etc.) from `package.json` and shows them as badges
 - **Package Manager Detection** — Detects npm, yarn, pnpm, or bun based on lock files
 - **Selective Deletion** — Choose exactly which folders to remove with checkboxes
-- **Merged Worktree Cleanup** — Finds worktrees already merged into any of a repository's base branches, including squash merges, protects dirty worktrees, and removes them without deleting branches
+- **Merged Worktree Cleanup** — Finds worktrees already merged into any of a repository's base branches, including squash merges, asks before discarding uncommitted changes, and removes them without deleting branches
 - **Menu Bar Mode** — Hide the Dock icon and keep a live count of removable worktrees and free disk space in the menu bar
 - **Sorting & Filtering** — Sort by name, size, or package manager
 - **Cross-Platform** — Native apps for Windows, macOS, and Linux
@@ -101,7 +101,7 @@ Beyond a plain ancestry check, a branch also counts as merged when its content i
 
 Worktrees with a detached HEAD are included; a worktree that holds a base branch itself never is. Registrations whose directory is already gone are reported as stale and cleared with `git worktree prune` rather than being mislabelled as having uncommitted changes.
 
-Removal is refused when there are uncommitted changes, when Git has locked the worktree, or when the worktree gained a commit after the scan. Untracked OS and watcher noise (`.DS_Store`, `.watchman-cookie-*`) is reported separately from real changes: it is what makes `git worktree remove` refuse, so removal retries once with a single `-f` after re-reading the worktree — never two, which is what would be needed to bypass a lock. Git branches are kept.
+Worktrees with uncommitted changes can be selected, but the confirmation dialog names every one of them and removes them only once you accept losing those changes. That consent covers only what the dialog listed: a worktree that was clean at scan time and has changes by the time you click Remove is still refused. Removal is always refused when Git has locked the worktree, or when the worktree gained a commit after the scan — accepting the loss of uncommitted files is not accepting the loss of a commit. A worktree that something else removed after the scan (another tool, another session) counts as removed rather than as a failure, and leaves the list. Untracked OS and watcher noise (`.DS_Store`, `.watchman-cookie-*`) is reported separately from real changes: it is what makes `git worktree remove` refuse, so removal retries once with a single `-f` after re-reading the worktree — never two, which is what would be needed to bypass a lock. Git branches are kept.
 
 ### Menu bar mode
 
@@ -109,9 +109,12 @@ Settings (the gear in the header) hold the only two things this app remembers be
 the Dock icon is hidden, and which folders the menu bar watches. For each watched folder the tray
 shows the free space on the volume that folder actually lives on — matched by longest mount point,
 so a folder on an external disk reports that disk and not the boot volume — and how many worktrees
-are ready to be removed right now. That count comes from the same merge detection the main window
+could be removed right now — exactly the rows the window lets you select for that folder, minus stale
+registrations, which free nothing. That count comes from the same merge detection the main window
 uses, minus the fetch and the size walk, so the background refresh never touches the network and
-never crawls `node_modules`. It updates every 15 minutes, on **Refresh now**, and after a cleanup.
+never crawls `node_modules`. It updates every 15 minutes, on **Refresh now**, and after a scan or a
+cleanup. When the window shows a watched folder and its list no longer matches the menu bar's count,
+the window says the list may be out of date and offers a rescan.
 
 Closing the window leaves the app running in the menu bar; **Quit** in the tray menu ends it.
 
