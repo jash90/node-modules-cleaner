@@ -891,7 +891,17 @@ fn collect_with_bases(
 
         // A worktree whose directory is gone leaves a registration behind. It is not dirty and
         // it is not merged — it is administrative litter, and `git worktree prune` is the fix.
-        if record.prunable_reason.is_some() || !record.path.exists() {
+        //
+        // "Gone" has to mean gone. `Path::exists` and Git's own prunable check both read an
+        // unreadable directory as missing, and treating that as stale would prune the
+        // registration of a worktree whose files are all still there. An unreadable worktree
+        // falls through instead, where its status read fails closed and removal reports why.
+        let is_stale = match record.path.try_exists() {
+            Ok(false) => true,
+            Ok(true) => record.prunable_reason.is_some(),
+            Err(_) => false,
+        };
+        if is_stale {
             candidates.push(MergedWorktree {
                 path: record.path.to_string_lossy().to_string(),
                 branch: branch_label,
@@ -1124,11 +1134,22 @@ fn remove_prepared_worktree(
         return prune_stale_worktree(repository, worktree);
     }
 
-    let Ok(requested_path) = worktree.canonicalize() else {
-        return WorktreeDeleteResult {
-            already_gone: true,
-            ..removed(path)
-        };
+    let requested_path = match worktree.canonicalize() {
+        Ok(requested_path) => requested_path,
+        // Deleted since the repository was re-read a moment ago. Only a missing path means
+        // "gone"; anything else — a permission error, say — leaves the worktree in place and has
+        // to be reported, not claimed as a removal.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if is_registered(repository, worktree) {
+                // The directory went but the registration stayed: that is a stale entry now.
+                return prune_stale_worktree(repository, worktree);
+            }
+            return WorktreeDeleteResult {
+                already_gone: true,
+                ..removed(path)
+            };
+        }
+        Err(error) => return failed_removal(path, format!("Cannot read worktree: {error}")),
     };
 
     if candidate.is_locked {
@@ -2250,6 +2271,39 @@ mod tests {
         assert!(results[0].success, "{}", results[0].error.clone().unwrap_or_default());
         assert!(results[0].already_gone);
         assert_eq!(results[0].error, None);
+    }
+
+    #[test]
+    fn an_unreadable_worktree_is_a_failure_not_already_gone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let repo = TestRepo::new();
+        let parent = repo.path().join("sealed");
+        fs::create_dir_all(&parent).expect("create parent directory");
+        repo.git(&["branch", "feature/sealed"]);
+        let worktree = parent.join("worktree");
+        repo.git(&[
+            "worktree",
+            "add",
+            worktree.to_str().expect("UTF-8 fixture path"),
+            "feature/sealed",
+        ]);
+        let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.branch == "feature/sealed")
+            .expect("sealed worktree candidate")
+            .clone();
+
+        // Still there and still registered — only unreachable. That is an error to report,
+        // never a removal to claim.
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o000)).expect("seal parent");
+        let results = delete_merged_worktrees_in(vec![removal(&candidate, true)]);
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).expect("unseal parent");
+
+        assert!(!results[0].success);
+        assert!(!results[0].already_gone);
+        assert!(worktree.exists());
     }
 
     #[test]

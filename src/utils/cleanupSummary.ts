@@ -132,3 +132,28 @@ export function trayCountFor(
   const match = stats.folders.find((entry) => normalizedPath(entry.folder) === target);
   return match ? match.removable_worktrees : null;
 }
+
+export interface TrayMismatchInput {
+  stats: { folders: Array<{ folder: string; removable_worktrees: number }> } | null;
+  statsReceivedAt: number;
+  listBuiltAt: number;
+  scanPath: string | null;
+  windowCount: number;
+  isBusy: boolean;
+  scanFailed: boolean;
+}
+
+/**
+ * When the menu bar and the window disagree about the scanned folder, the window's list is the
+ * one that aged. Only a count taken after the list was built says anything about it, and a
+ * failed scan's empty list is an error the window already shows — not evidence of change.
+ */
+export function detectTrayMismatch(
+  input: TrayMismatchInput,
+): { trayCount: number; windowCount: number } | null {
+  if (!input.stats || !input.scanPath || input.isBusy || input.scanFailed) return null;
+  if (input.statsReceivedAt <= input.listBuiltAt) return null;
+  const trayCount = trayCountFor(input.stats, input.scanPath);
+  if (trayCount === null || trayCount === input.windowCount) return null;
+  return { trayCount, windowCount: input.windowCount };
+}
