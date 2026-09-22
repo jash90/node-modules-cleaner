@@ -1,5 +1,6 @@
 // Regenerates the screenshots used by the GitHub Pages site in site/assets/screenshots/.
 //
+//   npx playwright install chromium   # once per machine
 //   npm run screenshots
 //
 // The app is a Tauri desktop app, so its frontend normally talks to Rust through
@@ -339,11 +340,10 @@ async function main() {
     await page.mouse.move(0, 0);
     await save(page, 'overview-desktop');
 
-    // Open-graph preview: a 1200x630 crop of the same view.
-    await page.screenshot({
-      path: join(root, 'site', 'assets', 'og-image.png'),
-      clip: { x: 0, y: 0, width: 1200, height: 630 },
-    });
+    // Open-graph preview at 1200x630 — the app's own minimum width, so no column is cut off.
+    await page.setViewportSize({ width: 1200, height: 630 });
+    await page.screenshot({ path: join(root, 'site', 'assets', 'og-image.png') });
+    await page.setViewportSize({ width: 1440, height: 900 });
     written.push(join(root, 'site', 'assets', 'og-image.png'));
 
     const scrollTo = async (text) => {
