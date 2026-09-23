@@ -24,30 +24,15 @@ const REMOTE_BASE_CANDIDATES: [&str; 4] = ["main", "master", "development", "dev
 /// compare against, and putting it first keeps the base order the same in every repository.
 const PRIMARY_REMOTE: &str = "origin";
 
-/// Hidden folders the repository walk never enters. Everything else is fair game, dot or not —
-/// worktree tools park checkouts in `.worktrees/` or `.claude/worktrees/`, and skipping every
-/// dot-directory made those invisible. These are the ones that are both large and never hold
-/// anybody's work: Git internals, the Trash, package-manager or toolchain caches, and the homes
-/// of runtime version managers (`.nvm` is itself a Git clone, so it would be evaluated too).
-const SKIPPED_HIDDEN_DIRECTORIES: [&str; 17] = [
-    ".git",
-    ".Trash",
-    ".cache",
-    ".npm",
-    ".pnpm-store",
-    ".cargo",
-    ".rustup",
-    ".gradle",
-    ".m2",
-    ".nvm",
-    ".pyenv",
-    ".rbenv",
-    ".volta",
-    ".asdf",
-    ".sdkman",
-    ".bun",
-    ".deno",
-];
+/// The only hidden folders the repository walk enters: `git worktree` homes and the agent
+/// worktrees Claude Code keeps (only its `worktrees` child — see `is_skipped_directory`).
+///
+/// Every other dot-directory is skipped. A denylist was tried and could not keep up: every
+/// discovered repository is fetched, so tool clones such as `~/.oh-my-zsh`, `~/.tmux/plugins/*`
+/// or `~/.nvm` got `git fetch` run on them although nobody picked them, and trees like
+/// `~/.vscode/extensions` were walked on every scan. Worktrees parked in other hidden folders
+/// are still found through their main repository's `git worktree list`.
+const WALKED_HIDDEN_DIRECTORIES: [&str; 2] = [".worktrees", ".claude"];
 
 /// Local fallbacks, used only when the repository has no usable remote base at all.
 /// A stale local `master` happily claims that everything is merged, so this is a last resort.
@@ -1729,6 +1714,17 @@ fn remove_merged_worktree(repository: &Path, worktree: &Path) -> WorktreeDeleteR
     }
 }
 
+fn is_skipped_directory(parent: &Path, name: &str) -> bool {
+    if name == "node_modules" {
+        return true;
+    }
+    if name.starts_with('.') {
+        return !WALKED_HIDDEN_DIRECTORIES.contains(&name);
+    }
+    // Inside `.claude` only `worktrees` holds checkouts; `plugins` holds tool clones.
+    name != "worktrees" && parent.file_name().is_some_and(|parent| parent == ".claude")
+}
+
 fn discover_git_repositories(scan_path: &Path) -> Vec<PathBuf> {
     let mut repositories = Vec::new();
     let mut pending = vec![scan_path.to_path_buf()];
@@ -1754,7 +1750,7 @@ fn discover_git_repositories(scan_path: &Path) -> Vec<PathBuf> {
             let name = file_name.to_string_lossy();
             // Only children are ever checked, so the folder the user picked is walked whatever
             // its own name — scanning `~/.config` works.
-            if name == "node_modules" || SKIPPED_HIDDEN_DIRECTORIES.contains(&name.as_ref()) {
+            if is_skipped_directory(&directory, &name) {
                 continue;
             }
             pending.push(entry.path());
@@ -3361,8 +3357,8 @@ mod tests {
     #[test]
     fn finds_repositories_inside_hidden_folders_below_the_root() {
         // Worktree tools like to park checkouts in `.worktrees/` or `.claude/worktrees/`; skipping
-        // every dot-directory made all of them invisible. Package-manager and OS caches are still
-        // skipped by name, because they are large and never hold anybody's work.
+        // every dot-directory made all of them invisible. Other hidden folders, caches included,
+        // are still skipped: only the checkout homes are walked.
         let root = scan_root("hidden-subfolder");
         let parked = root.join(".worktrees").join("parked-repo");
         let cached = root.join(".cache").join("cached-repo");
@@ -3395,6 +3391,32 @@ mod tests {
         let discovered = super::discover_git_repositories(&root);
 
         assert_eq!(discovered, vec![project]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn walks_only_hidden_folders_that_hold_checkouts() {
+        // Every discovered repository is fetched, so a tool's clone under a dot-directory
+        // (`~/.oh-my-zsh`, `~/.tmux/plugins/*`, Claude Code plugins) would get `git fetch` run
+        // on it although the user never picked it.
+        let root = scan_root("hidden-allowlist");
+        let parked = root.join(".worktrees").join("parked");
+        let agent = root.join(".claude").join("worktrees").join("task");
+        let tools = [
+            root.join(".oh-my-zsh"),
+            root.join(".tmux").join("plugins").join("tpm"),
+            root.join(".claude").join("plugins").join("some-plugin"),
+        ];
+        for repository in [&parked, &agent].into_iter().chain(tools.iter()) {
+            fs::create_dir_all(repository.join(".git")).expect("create repository marker");
+        }
+
+        let mut discovered = super::discover_git_repositories(&root);
+        discovered.sort();
+
+        let mut expected = vec![agent, parked];
+        expected.sort();
+        assert_eq!(discovered, expected);
         let _ = fs::remove_dir_all(root);
     }
 

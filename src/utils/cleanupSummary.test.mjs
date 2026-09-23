@@ -170,6 +170,21 @@ test("counts removable worktrees the way the menu bar does", () => {
   assert.equal(cleanupSummary.countRemovableWorktrees(worktrees), 2);
 });
 
+test("leaves blocked rows out of the removable count, as the menu bar does", () => {
+  // A row whose removal was refused ("No longer merged", "Changed since scan") stays listed but
+  // cannot be selected, and the menu bar no longer counts it — counting it here would raise a
+  // false "this list may be out of date" banner.
+  const worktrees = [
+    { path: "/wt/ok", is_locked: false, state: "merged" },
+    { path: "/wt/blocked", is_locked: false, state: "merged" },
+  ];
+
+  assert.equal(
+    cleanupSummary.countRemovableWorktrees(worktrees, new Map([["/wt/blocked", "No longer merged"]])),
+    1,
+  );
+});
+
 test("asks for consent only for selected worktrees that hold uncommitted changes", () => {
   const worktrees = [
     { path: "/wt/clean", is_dirty: false },

@@ -131,10 +131,15 @@ export function isSelectableWorktree(worktree: { is_locked: boolean }): boolean 
  * Stale entries are selectable but free nothing, so the menu bar leaves them out.
  */
 export function countRemovableWorktrees(
-  worktrees: Array<{ is_locked: boolean; state: string }>,
+  worktrees: Array<{ path?: string; is_locked: boolean; state: string }>,
+  // Rows whose removal was refused stay listed but are no longer removable — nor counted by the
+  // menu bar, which rescans them.
+  blocked: ReadonlyMap<string, string> = new Map(),
 ): number {
   return worktrees.filter((worktree) => (
-    isSelectableWorktree(worktree) && worktree.state !== 'stale'
+    isSelectableWorktree(worktree)
+    && worktree.state !== 'stale'
+    && !(worktree.path !== undefined && blocked.has(worktree.path))
   )).length;
 }
 
