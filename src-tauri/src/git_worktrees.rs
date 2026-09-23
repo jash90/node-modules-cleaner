@@ -8,18 +8,36 @@ use std::fs;
 use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-/// Remote bases worth checking beyond `origin/HEAD`. A repository whose default branch is
-/// `main` routinely merges feature work into `development` instead, and comparing against
-/// `origin/HEAD` alone reports every one of those branches as unmerged.
-const REMOTE_BASE_CANDIDATES: [&str; 4] = [
-    "origin/main",
-    "origin/master",
-    "origin/development",
-    "origin/develop",
+/// Branches worth checking on every remote beyond what that remote's `HEAD` points at. A
+/// repository whose default branch is `main` routinely merges feature work into `development`
+/// instead, and comparing against the remote `HEAD` alone reports every one of those branches as
+/// unmerged.
+const REMOTE_BASE_CANDIDATES: [&str; 4] = ["main", "master", "development", "develop"];
+
+/// Always asked about, and always first, whether or not `git remote` lists it: a repository
+/// whose remote-tracking refs outlived the remote's configuration still has `origin/*` refs to
+/// compare against, and putting it first keeps the base order the same in every repository.
+const PRIMARY_REMOTE: &str = "origin";
+
+/// Hidden folders the repository walk never enters. Everything else is fair game, dot or not —
+/// worktree tools park checkouts in `.worktrees/` or `.claude/worktrees/`, and skipping every
+/// dot-directory made those invisible. These are the ones that are both large and never hold
+/// anybody's work: Git internals, the Trash, and package-manager or toolchain caches.
+const SKIPPED_HIDDEN_DIRECTORIES: [&str; 9] = [
+    ".git",
+    ".Trash",
+    ".cache",
+    ".npm",
+    ".pnpm-store",
+    ".cargo",
+    ".rustup",
+    ".gradle",
+    ".m2",
 ];
 
 /// Local fallbacks, used only when the repository has no usable remote base at all.
@@ -90,16 +108,19 @@ thread_local! {
     /// Only the tray thread sets it. An unattended refresh nobody is waiting on should lose
     /// every race against a scan somebody just clicked, and both go through these same
     /// functions — so the distinction has to come from the caller. A thread-local carries it
-    /// without threading a flag through every signature, because the tick is sequential and
-    /// stays on the thread that set it.
+    /// without threading a flag through every signature. The one place the tick fans out to
+    /// rayon, `collect_with_bases`, reads the flag first and sets it again on each worker.
     static BACKGROUND_GIT: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Run `work` with every Git process it starts deprioritised.
+///
+/// Restores whatever the flag was before rather than clearing it, so a nested call — a rayon
+/// worker picking up tick work while it already runs some — cannot switch off an outer one.
 pub(crate) fn with_background_git<T>(work: impl FnOnce() -> T) -> T {
-    BACKGROUND_GIT.with(|flag| flag.set(true));
+    let previous = BACKGROUND_GIT.with(|flag| flag.replace(true));
     let result = work();
-    BACKGROUND_GIT.with(|flag| flag.set(false));
+    BACKGROUND_GIT.with(|flag| flag.set(previous));
     result
 }
 
@@ -200,6 +221,12 @@ struct BaseBranches {
     /// to know whether a previous answer still holds — so they are carried out rather than
     /// looked up a second time.
     tips: Vec<String>,
+    /// Root tree of each entry of `branches`, same order; empty where the ref is not a commit.
+    /// Read in the same `for-each-ref` as the tips, so the tree check costs no extra process.
+    trees: Vec<String>,
+    /// Every remote the bases were looked up on, so a base's local name can be recovered for
+    /// any of them and not only for `origin`.
+    remotes: Vec<String>,
     used_local_fallback: bool,
 }
 
@@ -213,12 +240,26 @@ struct WorktreeStatus {
 /// Throwaway object directory for the squash-merge probe. `git commit-tree` writes a real
 /// object, and pointing `GIT_OBJECT_DIRECTORY` here keeps those synthetic commits out of the
 /// user's repository instead of leaving one dangling commit per worktree per scan.
+///
+/// It also carries the repository's real object directory, which every probe needs as the
+/// alternate. That used to be asked of Git once per probe — once per worktree per base — for an
+/// answer that is the same for the whole repository.
 struct ScratchObjectDir {
     path: PathBuf,
+    objects: String,
 }
 
 impl ScratchObjectDir {
-    fn new() -> Option<Self> {
+    fn for_repository(repository: &Path) -> Option<Self> {
+        let objects = git_stdout(
+            repository,
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                "objects",
+            ],
+        )?;
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
@@ -226,7 +267,16 @@ impl ScratchObjectDir {
             std::process::id()
         ));
         fs::create_dir_all(&path).ok()?;
-        Some(Self { path })
+        Some(Self { path, objects })
+    }
+
+    /// A `git` that reads the repository's objects but writes any new ones here.
+    fn git(&self, repository: &Path) -> Command {
+        let mut command = git_command(repository);
+        command
+            .env("GIT_OBJECT_DIRECTORY", &self.path)
+            .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &self.objects);
+        command
     }
 }
 
@@ -237,10 +287,7 @@ impl Drop for ScratchObjectDir {
 }
 
 fn git_stdout(directory: &Path, args: &[&str]) -> Option<String> {
-    let output = git_command(directory)
-        .args(args)
-        .output()
-        .ok()?;
+    let output = git_command(directory).args(args).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -303,9 +350,18 @@ fn parse_worktree_porcelain(output: &[u8]) -> Vec<WorktreeRecord> {
 }
 
 /// The local name a base branch corresponds to, so a worktree sitting on `main` can be matched
-/// against the base `origin/main`.
-fn base_branch_local_name(base: &str) -> &str {
-    base.strip_prefix("origin/").unwrap_or(base)
+/// against the base `origin/main` — or `upstream/main`, or any other remote's.
+fn base_branch_local_name<'a>(base: &'a str, remotes: &[String]) -> &'a str {
+    // Longest remote first: with remotes `foo` and `foo/bar`, `foo/bar/main` is `main`.
+    remotes
+        .iter()
+        .filter_map(|remote| {
+            base.strip_prefix(remote.as_str())
+                .and_then(|rest| rest.strip_prefix('/'))
+                .map(|local| (remote.len(), local))
+        })
+        .max_by_key(|(length, _)| *length)
+        .map_or(base, |(_, local)| local)
 }
 
 /// `refs/remotes/origin/main` -> `origin/main`, `refs/heads/main` -> `main`.
@@ -319,14 +375,39 @@ fn shorten_ref(reference: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Every base a repository might be compared against, resolved in one `git` call.
+/// Every remote to look for bases on: `origin` first, then the rest in Git's own order.
+///
+/// Remote names are taken from `git remote` rather than guessed from `refs/remotes/*`, because
+/// a remote name may itself contain a slash and the ref alone cannot say where it ends.
+fn list_remotes(repository: &Path) -> Vec<String> {
+    let mut remotes = vec![PRIMARY_REMOTE.to_string()];
+    if let Some(listing) = git_stdout(repository, &["remote"]) {
+        for name in listing
+            .lines()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            if !remotes.iter().any(|remote| remote == name) {
+                remotes.push(name.to_string());
+            }
+        }
+    }
+    remotes
+}
+
+/// Every base a repository might be compared against, resolved in one `for-each-ref`.
 ///
 /// This used to probe each candidate on its own — a `symbolic-ref`, then a `rev-parse` per
 /// remote candidate, then a `show-ref` per local one — which is five to nine processes for a
-/// question `for-each-ref` answers in a single line each. It also hands back the tip commits,
-/// which the caller needs anyway.
+/// question `for-each-ref` answers in a single line each. It also hands back the tip commits
+/// and their trees, which the caller needs anyway.
 ///
-/// Reading `%(symref)` is not optional: `refs/remotes/origin/HEAD` is a pointer, and without
+/// Every remote counts, not only `origin`: a fork whose only remote is `upstream` merges into
+/// `upstream/main`, and comparing against local branches instead reported all of it as open.
+/// Each remote contributes its `HEAD` target first and then the fixed candidates, and `origin`
+/// comes first, so the order does not depend on which remotes happen to exist.
+///
+/// Reading `%(symref)` is not optional: `refs/remotes/<remote>/HEAD` is a pointer, and without
 /// following it the base would be the pointer's own name, which no worktree ever matches.
 ///
 /// The names are asked for in full and shortened here rather than with `:short`, because
@@ -335,15 +416,19 @@ fn shorten_ref(reference: &str) -> Option<String> {
 /// `refs/remotes/origin/master` as `master` when no local `master` is present. Full names are
 /// the same in every repository.
 ///
-/// A dangling `origin/HEAD` comes back with an empty `%(objectname)` and is skipped, leaving
-/// the local fallback to answer.
+/// A dangling remote `HEAD` comes back with an empty `%(objectname)` and is skipped, leaving
+/// the other candidates — and failing those, the local fallback — to answer.
 fn find_base_branches(repository: &Path) -> BaseBranches {
-    let mut patterns: Vec<String> = vec!["refs/remotes/origin/HEAD".to_string()];
-    patterns.extend(
-        REMOTE_BASE_CANDIDATES
-            .iter()
-            .map(|candidate| format!("refs/remotes/{candidate}")),
-    );
+    let remotes = list_remotes(repository);
+    let mut patterns: Vec<String> = Vec::new();
+    for remote in &remotes {
+        patterns.push(format!("refs/remotes/{remote}/HEAD"));
+        patterns.extend(
+            REMOTE_BASE_CANDIDATES
+                .iter()
+                .map(|candidate| format!("refs/remotes/{remote}/{candidate}")),
+        );
+    }
     patterns.extend(
         LOCAL_BASE_CANDIDATES
             .iter()
@@ -352,24 +437,28 @@ fn find_base_branches(repository: &Path) -> BaseBranches {
 
     let mut args = vec![
         "for-each-ref".to_string(),
-        "--format=%(refname)\t%(objectname)\t%(symref)".to_string(),
+        "--format=%(refname)\t%(objectname)\t%(tree)\t%(symref)".to_string(),
     ];
     args.extend(patterns);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
 
     let Some(listing) = git_stdout(repository, &args) else {
-        return BaseBranches::default();
+        return BaseBranches {
+            remotes,
+            ..BaseBranches::default()
+        };
     };
 
-    // name -> tip, plus whatever `origin/HEAD` turned out to point at.
-    let mut tips: HashMap<String, String> = HashMap::new();
-    let mut origin_head: Option<(String, String)> = None;
+    // name -> (tip, tree), plus whatever each remote's `HEAD` turned out to point at.
+    let mut refs: HashMap<String, (String, String)> = HashMap::new();
+    let mut remote_heads: HashMap<String, (String, String, String)> = HashMap::new();
 
     for line in listing.lines() {
         let mut fields = line.split('\t');
         let (Some(name), Some(object)) = (fields.next(), fields.next()) else {
             continue;
         };
+        let tree = fields.next().unwrap_or("").trim();
         let symref = fields.next().unwrap_or("").trim();
         let (name, object) = (name.trim(), object.trim());
         if object.is_empty() {
@@ -378,55 +467,60 @@ fn find_base_branches(repository: &Path) -> BaseBranches {
             continue;
         }
 
-        if name == "refs/remotes/origin/HEAD" {
+        let head_of = name
+            .strip_prefix("refs/remotes/")
+            .and_then(|rest| rest.strip_suffix("/HEAD"))
+            .filter(|remote| remotes.iter().any(|known| known == remote));
+        if let Some(remote) = head_of {
             if let Some(target) = shorten_ref(symref) {
-                origin_head = Some((target, object.to_string()));
+                remote_heads.insert(
+                    remote.to_string(),
+                    (target, object.to_string(), tree.to_string()),
+                );
             }
             continue;
         }
         if let Some(name) = shorten_ref(name) {
-            tips.insert(name, object.to_string());
+            refs.insert(name, (object.to_string(), tree.to_string()));
         }
     }
 
-    let mut branches: Vec<String> = Vec::new();
-    let mut resolved: Vec<String> = Vec::new();
-    let push = |name: String, tip: String, branches: &mut Vec<String>, resolved: &mut Vec<String>| {
-        if !branches.contains(&name) {
-            branches.push(name);
-            resolved.push(tip);
+    let mut bases = BaseBranches {
+        remotes,
+        ..BaseBranches::default()
+    };
+    let push = |name: String, tip: &str, tree: &str, bases: &mut BaseBranches| {
+        if !bases.branches.contains(&name) {
+            bases.branches.push(name);
+            bases.tips.push(tip.to_string());
+            bases.trees.push(tree.to_string());
         }
     };
 
-    if let Some((name, tip)) = origin_head {
-        push(name, tip, &mut branches, &mut resolved);
-    }
-    for candidate in REMOTE_BASE_CANDIDATES {
-        if let Some(tip) = tips.get(candidate) {
-            push(candidate.to_string(), tip.clone(), &mut branches, &mut resolved);
+    for remote in bases.remotes.clone() {
+        if let Some((name, tip, tree)) = remote_heads.get(&remote) {
+            push(name.clone(), tip, tree, &mut bases);
+        }
+        for candidate in REMOTE_BASE_CANDIDATES {
+            let name = format!("{remote}/{candidate}");
+            if let Some((tip, tree)) = refs.get(&name) {
+                push(name, tip, tree, &mut bases);
+            }
         }
     }
 
-    if !branches.is_empty() {
-        return BaseBranches {
-            branches,
-            tips: resolved,
-            used_local_fallback: false,
-        };
+    if !bases.branches.is_empty() {
+        return bases;
     }
 
     for candidate in LOCAL_BASE_CANDIDATES {
-        if let Some(tip) = tips.get(candidate) {
-            push(candidate.to_string(), tip.clone(), &mut branches, &mut resolved);
+        if let Some((tip, tree)) = refs.get(candidate) {
+            push(candidate.to_string(), tip, tree, &mut bases);
         }
     }
 
-    let used_local_fallback = !branches.is_empty();
-    BaseBranches {
-        branches,
-        tips: resolved,
-        used_local_fallback,
-    }
+    bases.used_local_fallback = !bases.branches.is_empty();
+    bases
 }
 
 fn is_ancestor(repository: &Path, ancestor: &str, descendant: &str) -> Result<bool, String> {
@@ -463,28 +557,15 @@ fn is_ancestor(repository: &Path, ancestor: &str, descendant: &str) -> Result<bo
 ///
 /// The synthetic commit is written into a scratch object directory so the probe leaves the
 /// repository's object database untouched.
-fn is_squash_merged(
-    repository: &Path,
-    head: &str,
-    base: &str,
-    scratch: &ScratchObjectDir,
-) -> bool {
+fn is_squash_merged(repository: &Path, head: &str, base: &str, scratch: &ScratchObjectDir) -> bool {
     let Some(merge_base) = git_stdout(repository, &["merge-base", base, head]) else {
         return false;
     };
     let Some(tree) = git_stdout(repository, &["rev-parse", &format!("{head}^{{tree}}")]) else {
         return false;
     };
-    let Some(objects) = git_stdout(
-        repository,
-        &["rev-parse", "--path-format=absolute", "--git-path", "objects"],
-    ) else {
-        return false;
-    };
-    let mut probe = git_command(repository);
+    let mut probe = scratch.git(repository);
     probe
-        .env("GIT_OBJECT_DIRECTORY", &scratch.path)
-        .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &objects)
         .env("GIT_AUTHOR_NAME", "node-modules-cleaner")
         .env("GIT_AUTHOR_EMAIL", "probe@node-modules-cleaner.invalid")
         .env("GIT_COMMITTER_NAME", "node-modules-cleaner")
@@ -501,9 +582,8 @@ fn is_squash_merged(
         return false;
     }
 
-    let cherry = git_command(repository)
-        .env("GIT_OBJECT_DIRECTORY", &scratch.path)
-        .env("GIT_ALTERNATE_OBJECT_DIRECTORIES", &objects)
+    let cherry = scratch
+        .git(repository)
         .args(["cherry", base, &synthetic])
         .output();
 
@@ -513,6 +593,217 @@ fn is_squash_merged(
             .next()
             .is_some_and(|line| line.starts_with('-')),
         _ => false,
+    }
+}
+
+/// Did every commit of the branch land on the base under a different hash?
+///
+/// "Rebase and merge" replays each commit onto the base, so the branch is never an ancestor, and
+/// the squash probe compares one combined patch against commits that each carry only part of
+/// it. `git cherry` compares commit by commit: a `-` line is a commit whose patch the base
+/// already has. Merged only when there is at least one line and every one of them is a `-` — an
+/// empty listing means the branch has nothing of its own, which is the ancestor check's case.
+fn is_rebase_merged(repository: &Path, head: &str, base: &str) -> bool {
+    let Ok(output) = git_command(repository)
+        .args(["cherry", base, head])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut lines = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .peekable();
+    lines.peek().is_some() && lines.all(|line| line.starts_with('-'))
+}
+
+/// What merging the branch into the base would do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TreeCheck {
+    /// The merge is clean and changes nothing: everything the branch has, the base has.
+    Merged,
+    /// The merge is clean and changes the base: the branch holds something the base does not.
+    NotMerged,
+    /// No clean answer — a conflict, a Git too old for `--write-tree`, a base that is not a
+    /// commit. The patch-id probe still gets its turn.
+    Inconclusive,
+}
+
+/// Would merging the branch into the base change nothing at all?
+///
+/// This is what catches a squash merge that landed after the base moved on. Patch ids include
+/// context lines, so once the base edits something next to the branch's change the squash
+/// probe's patch and the real squash commit no longer match — while a real three-way merge
+/// shrugs, because the change is already there. Only a clean merge (exit 0) is an answer;
+/// conflicts (exit 1) and a Git older than 2.38, which has no `--write-tree`, are inconclusive
+/// rather than errors.
+///
+/// A clean merge that *does* change the base is an answer too, and it lets the caller skip the
+/// squash probe: if the branch's patch were in the base, merging it again would change nothing
+/// unless the base later took that change back out. Skipping it cuts two of the most expensive
+/// processes from every unmerged worktree; the price is that a squash the base later reverted
+/// is no longer offered — which is also the honest answer, since the base no longer has it.
+///
+/// `merge-tree` writes the merged trees as objects, so it runs against the scratch object
+/// directory like the squash probe.
+fn tree_check(
+    repository: &Path,
+    head: &str,
+    base: &str,
+    base_tree: &str,
+    scratch: &ScratchObjectDir,
+) -> TreeCheck {
+    if base_tree.is_empty() {
+        return TreeCheck::Inconclusive;
+    }
+    let Ok(output) = scratch
+        .git(repository)
+        .args(["merge-tree", "--write-tree", base, head])
+        .output()
+    else {
+        return TreeCheck::Inconclusive;
+    };
+    if output.status.code() != Some(0) {
+        return TreeCheck::Inconclusive;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    match stdout.lines().next().map(str::trim) {
+        Some(tree) if tree == base_tree => TreeCheck::Merged,
+        Some(tree) if !tree.is_empty() => TreeCheck::NotMerged,
+        _ => TreeCheck::Inconclusive,
+    }
+}
+
+/// Has the branch never moved since it was created?
+///
+/// A worktree someone has just started sits on the base tip it was branched from, so it is
+/// trivially an ancestor of the base — the same as a branch that was fast-forward merged. The
+/// branch's reflog tells them apart: a lone "branch: Created from …" entry means nobody ever
+/// committed, pulled or reset there. Renames are skipped over — they move nothing, and tools
+/// that name a branch after its first prompt rename it straight after creating it. Reflog
+/// messages are written untranslated, so the prefixes hold in every locale.
+///
+/// Anything else — more entries, no reflog at all because `core.logAllRefUpdates` is off or it
+/// expired, a failing `git` — answers `false` and the worktree is still offered. That fails
+/// toward showing: removal re-checks HEAD, cleanliness and locks on its own, whereas hiding a
+/// merged worktree leaves it on disk with nobody told. The cost is that a branch created
+/// straight from a merged remote branch (a checkout for review) and never touched also counts
+/// as "never moved" and is not offered.
+fn branch_never_moved(repository: &Path, branch: &str) -> bool {
+    let reference = format!("refs/heads/{branch}");
+    let Some(log) = git_stdout(
+        repository,
+        &["reflog", "show", "--format=%gs", &reference, "--"],
+    ) else {
+        return false;
+    };
+    let mut entries = log
+        .lines()
+        .filter(|entry| !entry.starts_with("Branch: renamed "));
+    matches!(
+        (entries.next(), entries.next()),
+        (Some(only), None) if only.starts_with("branch: Created from")
+    )
+}
+
+/// Is `head` the commit `base` points at right now? Unresolvable answers `false`, which keeps
+/// the worktree offered — the same direction `branch_never_moved` fails in.
+fn is_base_tip(repository: &Path, head: &str, base: &str) -> bool {
+    git_stdout(
+        repository,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{base}^{{commit}}"),
+        ],
+    )
+    .is_some_and(|tip| tip == head)
+}
+
+/// What one worktree's comparison against every base came to.
+struct Comparison {
+    verdict: Verdict,
+    /// Bases the comparison could not be made against, with Git's reason.
+    errors: Vec<(String, String)>,
+}
+
+/// Compare one worktree's HEAD with each base in turn, cheapest check first, stopping at the
+/// first base it is merged into.
+///
+/// A base that cannot be compared at all — a ref pointing at something other than a commit, a
+/// missing object — is recorded and skipped rather than ending the whole repository's scan: one
+/// broken remote-tracking ref used to hide every worktree the repository had.
+fn compare_with_bases(
+    repository: &Path,
+    head: &str,
+    bases: &BaseBranches,
+    scratch: &OnceLock<Option<ScratchObjectDir>>,
+) -> Comparison {
+    let mut errors = Vec::new();
+    let squashed = |base: &String| Verdict::Matched {
+        base: base.clone(),
+        state: STATE_SQUASHED,
+    };
+
+    for (index, base) in bases.branches.iter().enumerate() {
+        match is_ancestor(repository, head, base) {
+            Ok(true) => {
+                return Comparison {
+                    verdict: Verdict::Matched {
+                        base: base.clone(),
+                        state: STATE_MERGED,
+                    },
+                    errors,
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                errors.push((base.clone(), error));
+                continue;
+            }
+        }
+
+        if is_rebase_merged(repository, head, base) {
+            return Comparison {
+                verdict: squashed(base),
+                errors,
+            };
+        }
+
+        // Created on the first probe this repository needs and reused for the rest: it used to
+        // be made and torn down around every single probe, which on a full scan is a few hundred
+        // create/write/delete cycles in the temp directory for work that fits in one. A failure
+        // to create it is remembered too, instead of being retried for every base. Worktrees
+        // compared in parallel share it; Git writes loose objects by atomic rename, so two probes
+        // writing the same object into it cannot corrupt each other.
+        let Some(scratch) = scratch
+            .get_or_init(|| ScratchObjectDir::for_repository(repository))
+            .as_ref()
+        else {
+            continue;
+        };
+        let base_tree = bases.trees.get(index).map(String::as_str).unwrap_or("");
+        let merged = match tree_check(repository, head, base, base_tree, scratch) {
+            TreeCheck::Merged => true,
+            TreeCheck::NotMerged => false,
+            TreeCheck::Inconclusive => is_squash_merged(repository, head, base, scratch),
+        };
+        if merged {
+            return Comparison {
+                verdict: squashed(base),
+                errors,
+            };
+        }
+    }
+
+    Comparison {
+        verdict: Verdict::Unmerged,
+        errors,
     }
 }
 
@@ -825,12 +1116,22 @@ impl VerdictCache {
     }
 }
 
+/// One repository's worth of scan output.
+#[derive(Debug, Default)]
+struct RepositoryScan {
+    candidates: Vec<MergedWorktree>,
+    /// The bases the candidates were compared against; `None` when nothing was compared.
+    bases: Option<BaseBranches>,
+    /// Comparisons that could not be made, for the scan's warnings.
+    warnings: Vec<String>,
+}
+
 /// Candidates only, for the callers that do not report which bases were used.
 fn collect_merged_worktrees(
     repository: &Path,
     cache: Option<&mut VerdictCache>,
 ) -> Result<Vec<MergedWorktree>, String> {
-    collect_with_bases(repository, cache).map(|(candidates, _)| candidates)
+    collect_with_bases(repository, cache).map(|scan| scan.candidates)
 }
 
 /// Candidates plus the bases they were compared against.
@@ -839,17 +1140,26 @@ fn collect_merged_worktrees(
 /// it — once here and once in the caller, for every repository including the ones that turn out
 /// to have no linked worktrees at all. Returning them means the question is asked once, and only
 /// where the answer is actually needed.
+///
+/// A base that cannot be compared with one worktree becomes a warning and the other bases still
+/// answer. Only when no comparison in the whole repository could be made against any base is the
+/// repository reported as an error, as before: with nothing to compare against, "not merged"
+/// would be a guess dressed up as an answer.
 fn collect_with_bases(
     repository: &Path,
     mut cache: Option<&mut VerdictCache>,
-) -> Result<(Vec<MergedWorktree>, Option<BaseBranches>), String> {
+) -> Result<RepositoryScan, String> {
     let output = git_command(repository)
         .args(["worktree", "list", "--porcelain", "-z"])
         .output()
         .map_err(|error| format!("Failed to run git: {error}"))?;
 
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+        return Err(failure_detail(
+            &output.stderr,
+            output.status,
+            "git worktree list",
+        ));
     }
 
     let records = parse_worktree_porcelain(&output.stdout);
@@ -862,7 +1172,7 @@ fn collect_with_bases(
     // without commits yet — which has no branches to compare against — stays quiet instead of
     // being reported as unscannable.
     if records.len() <= 1 {
-        return Ok((Vec::new(), None));
+        return Ok(RepositoryScan::default());
     }
 
     let bases = find_base_branches(repository);
@@ -875,25 +1185,25 @@ fn collect_with_bases(
         .and_then(|name| name.to_str())
         .unwrap_or("Repository")
         .to_string();
-    let mut candidates = Vec::new();
-    let mut scratch: Option<ScratchObjectDir> = None;
+    // First pass, cheap and in order: settle every record that needs no comparison, and queue
+    // the rest. Keeping one slot per record means the candidates come out in Git's order no
+    // matter how the comparisons below are scheduled.
+    enum Slot {
+        Ready(Box<MergedWorktree>),
+        Compare(WorktreeRecord),
+    }
+    let mut slots = Vec::new();
 
     for record in records.into_iter().skip(1) {
         if record.is_bare {
             continue;
         }
 
-        let is_detached = record.is_detached || record.branch.is_none();
-        let branch_label = record
-            .branch
-            .clone()
-            .unwrap_or_else(|| DETACHED_BRANCH_LABEL.to_string());
-
         // A worktree whose directory is gone leaves a registration behind. It is not dirty and
-        // it is not merged — it is administrative litter, and `git worktree prune` is the fix.
+        // it is not merged — it is administrative litter, cleared one entry at a time.
         //
         // "Gone" has to mean gone. `Path::exists` and Git's own prunable check both read an
-        // unreadable directory as missing, and treating that as stale would prune the
+        // unreadable directory as missing, and treating that as stale would drop the
         // registration of a worktree whose files are all still there. An unreadable worktree
         // falls through instead, where its status read fails closed and removal reports why.
         let is_stale = match record.path.try_exists() {
@@ -902,9 +1212,9 @@ fn collect_with_bases(
             Err(_) => false,
         };
         if is_stale {
-            candidates.push(MergedWorktree {
+            slots.push(Slot::Ready(Box::new(MergedWorktree {
                 path: record.path.to_string_lossy().to_string(),
-                branch: branch_label,
+                branch: branch_label(&record),
                 repository_path: repository_path.to_string_lossy().to_string(),
                 repository_name: repository_name.clone(),
                 base_branch: String::new(),
@@ -915,13 +1225,13 @@ fn collect_with_bases(
                 lock_reason: record.lock_reason.filter(|reason| !reason.is_empty()),
                 head: record.head.clone(),
                 state: STATE_STALE.to_string(),
-                is_detached,
+                is_detached: record.is_detached || record.branch.is_none(),
                 junk_file_count: 0,
                 stale_reason: record
                     .prunable_reason
                     .filter(|reason| !reason.is_empty())
                     .or_else(|| Some("worktree directory is missing".to_string())),
-            });
+            })));
             continue;
         }
 
@@ -935,63 +1245,144 @@ fn collect_with_bases(
             if bases
                 .branches
                 .iter()
-                .any(|base| base_branch_local_name(base) == branch)
+                .any(|base| base_branch_local_name(base, &bases.remotes) == branch)
             {
                 continue;
             }
         }
 
-        let verdict = match cache
-            .as_deref_mut()
-            .and_then(|cache| cache.lookup(repository, &record.path, &record.head, &bases))
-        {
-            Some(verdict) => verdict,
-            None => {
-                let mut matched = Verdict::Unmerged;
-                for base in &bases.branches {
-                    // An error here is a broken repository rather than an answer, so it
-                    // propagates instead of being remembered as "not merged".
-                    if is_ancestor(repository, &record.head, base)? {
-                        matched = Verdict::Matched {
-                            base: base.clone(),
-                            state: STATE_MERGED,
-                        };
-                        break;
-                    }
-                    // Created on the first probe this repository needs and reused for the
-                    // rest: it used to be made and torn down around every single probe, which
-                    // on a full scan is a few hundred create/write/delete cycles in the temp
-                    // directory for work that fits in one.
-                    if scratch.is_none() {
-                        scratch = ScratchObjectDir::new();
-                    }
-                    let squashed = scratch.as_ref().is_some_and(|scratch| {
-                        is_squash_merged(repository, &record.head, base, scratch)
-                    });
-                    if squashed {
-                        matched = Verdict::Matched {
-                            base: base.clone(),
-                            state: STATE_SQUASHED,
-                        };
-                        break;
-                    }
-                }
-                if let Some(cache) = cache.as_deref_mut() {
-                    cache.store(repository, &record.path, &record.head, &bases, matched.clone());
-                }
-                matched
-            }
-        };
+        slots.push(Slot::Compare(record));
+    }
 
-        let Verdict::Matched { base: base_branch, state } = verdict else {
+    // Second pass: the comparisons, which are where a scan spends its time. Each worktree is
+    // independent of the others, so they run in parallel — a repository with seventy worktrees
+    // used to compare them one after another. Only the cache is touched sequentially, before
+    // and after, because it is borrowed mutably.
+    //
+    // The menu bar tick marks its thread for background priority, and a thread-local does not
+    // reach rayon's workers; the flag is carried across explicitly so the tick's Git still
+    // yields to the user, it just no longer queues behind itself.
+    let mut comparisons: Vec<Option<Comparison>> = slots
+        .iter()
+        .map(|slot| {
+            let Slot::Compare(record) = slot else {
+                return None;
+            };
+            cache
+                .as_deref_mut()
+                .and_then(|cache| cache.lookup(repository, &record.path, &record.head, &bases))
+                .map(|verdict| Comparison {
+                    verdict,
+                    errors: Vec::new(),
+                })
+        })
+        .collect();
+    let answered_from_cache: Vec<bool> = comparisons.iter().map(Option::is_some).collect();
+
+    let background = BACKGROUND_GIT.with(Cell::get);
+    let scratch: OnceLock<Option<ScratchObjectDir>> = OnceLock::new();
+    slots
+        .par_iter()
+        .zip(comparisons.par_iter_mut())
+        .for_each(|(slot, comparison)| {
+            let Slot::Compare(record) = slot else {
+                return;
+            };
+            if comparison.is_some() {
+                return;
+            }
+            let compare = || compare_with_bases(repository, &record.head, &bases, &scratch);
+            *comparison = Some(if background {
+                with_background_git(compare)
+            } else {
+                compare()
+            });
+        });
+
+    if let Some(cache) = cache {
+        for ((slot, comparison), from_cache) in
+            slots.iter().zip(&comparisons).zip(answered_from_cache)
+        {
+            let (Slot::Compare(record), Some(comparison)) = (slot, comparison) else {
+                continue;
+            };
+            // A verdict reached while a base was unreadable is only partial; the next pass asks
+            // again instead of repeating it from memory.
+            if !from_cache && comparison.errors.is_empty() {
+                cache.store(
+                    repository,
+                    &record.path,
+                    &record.head,
+                    &bases,
+                    comparison.verdict.clone(),
+                );
+            }
+        }
+    }
+
+    let mut candidates = Vec::new();
+    let mut warnings = Vec::new();
+    // Worktrees that got an answer from at least one base, and the first reason one got none.
+    let mut answered = 0usize;
+    let mut unanswerable: Option<String> = None;
+
+    for (slot, comparison) in slots.into_iter().zip(comparisons) {
+        let (record, comparison) = match (slot, comparison) {
+            (Slot::Ready(candidate), _) => {
+                candidates.push(*candidate);
+                continue;
+            }
+            (Slot::Compare(record), Some(comparison)) => (record, comparison),
+            (Slot::Compare(_), None) => continue,
+        };
+        let label = branch_label(&record);
+
+        if comparison.errors.len() == bases.branches.len() {
+            // Not one base could be compared. Nothing is known about this worktree, so it is
+            // neither offered nor remembered.
+            let (base, error) = &comparison.errors[0];
+            warnings.push(format!(
+                "{}: could not compare {label} with any base branch ({base}: {error})",
+                repository.display()
+            ));
+            unanswerable.get_or_insert_with(|| error.clone());
+            continue;
+        }
+        for (base, error) in &comparison.errors {
+            warnings.push(format!(
+                "{}: could not compare {label} with {base} ({error})",
+                repository.display()
+            ));
+        }
+        answered += 1;
+
+        let Verdict::Matched {
+            base: base_branch,
+            state,
+        } = comparison.verdict
+        else {
             continue;
         };
+
+        // Checked after the verdict, and outside the cache, because the reflog can change while
+        // HEAD and every base stand still — a commit followed by a reset back to where the
+        // branch started, say. Only a plain ancestor match can be a branch that never moved; the
+        // other checks all need commits of the branch's own.
+        // A branch that never moved but that the base has since left behind is an abandoned
+        // checkout, not a fresh start — it holds nothing the base lacks, so it is offered.
+        if state == STATE_MERGED && is_base_tip(repository, &record.head, &base_branch) {
+            if let Some(branch) = record.branch.as_deref() {
+                if branch_never_moved(repository, branch) {
+                    continue;
+                }
+            }
+        }
 
         let status = worktree_status(&record.path);
 
         candidates.push(MergedWorktree {
             path: record.path.to_string_lossy().to_string(),
-            branch: branch_label,
+            branch: label,
             repository_path: repository_path.to_string_lossy().to_string(),
             repository_name: repository_name.clone(),
             base_branch,
@@ -1002,13 +1393,29 @@ fn collect_with_bases(
             lock_reason: record.lock_reason.filter(|reason| !reason.is_empty()),
             head: record.head.clone(),
             state: state.to_string(),
-            is_detached,
+            is_detached: record.is_detached || record.branch.is_none(),
             junk_file_count: status.junk_file_count,
             stale_reason: None,
         });
     }
 
-    Ok((candidates, Some(bases)))
+    if let (0, Some(error)) = (answered, unanswerable) {
+        return Err(error);
+    }
+
+    Ok(RepositoryScan {
+        candidates,
+        bases: Some(bases),
+        warnings,
+    })
+}
+
+/// What the window shows as a worktree's branch: its name, or a marker for a detached HEAD.
+fn branch_label(record: &WorktreeRecord) -> String {
+    record
+        .branch
+        .clone()
+        .unwrap_or_else(|| DETACHED_BRANCH_LABEL.to_string())
 }
 
 fn registered_worktree_paths(repository: &Path) -> Vec<PathBuf> {
@@ -1029,7 +1436,10 @@ fn registered_worktree_paths(repository: &Path) -> Vec<PathBuf> {
 
 /// Match a requested path against a scan result. Compares literally first so a stale entry —
 /// whose directory no longer exists and therefore cannot be canonicalized — still matches.
-fn find_candidate<'a>(candidates: &'a [MergedWorktree], worktree: &Path) -> Option<&'a MergedWorktree> {
+fn find_candidate<'a>(
+    candidates: &'a [MergedWorktree],
+    worktree: &Path,
+) -> Option<&'a MergedWorktree> {
     let canonical = worktree.canonicalize().ok();
     candidates.iter().find(|candidate| {
         let candidate_path = Path::new(&candidate.path);
@@ -1042,12 +1452,14 @@ fn find_candidate<'a>(candidates: &'a [MergedWorktree], worktree: &Path) -> Opti
 
 fn is_registered(repository: &Path, worktree: &Path) -> bool {
     let canonical = worktree.canonicalize().ok();
-    registered_worktree_paths(repository).into_iter().any(|path| {
-        path == worktree
-            || canonical
-                .as_ref()
-                .is_some_and(|target| path.canonicalize().ok().as_ref() == Some(target))
-    })
+    registered_worktree_paths(repository)
+        .into_iter()
+        .any(|path| {
+            path == worktree
+                || canonical
+                    .as_ref()
+                    .is_some_and(|target| path.canonicalize().ok().as_ref() == Some(target))
+        })
 }
 
 fn failed_removal(path: String, error: impl Into<String>) -> WorktreeDeleteResult {
@@ -1081,8 +1493,27 @@ fn run_worktree_remove(repository: &Path, worktree: &Path, force: bool) -> Resul
 
     match command.output() {
         Ok(output) if output.status.success() => Ok(()),
-        Ok(output) => Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
+        Ok(output) => Err(failure_detail(
+            &output.stderr,
+            output.status,
+            "git worktree remove",
+        )),
         Err(error) => Err(format!("Failed to run git: {error}")),
+    }
+}
+
+/// Why a `git` command failed, in words the user can act on.
+///
+/// Git's stderr when it has any. Without it the failure would reach the UI as an empty string —
+/// a red row with no reason — so the exit status stands in.
+fn failure_detail(stderr: &[u8], status: ExitStatus, command: &str) -> String {
+    let detail = String::from_utf8_lossy(stderr).trim().to_string();
+    if !detail.is_empty() {
+        return detail;
+    }
+    match status.code() {
+        Some(code) => format!("{command} exited with status {code}"),
+        None => format!("{command} was stopped by a signal"),
     }
 }
 
@@ -1134,7 +1565,7 @@ fn remove_prepared_worktree(
     };
 
     if candidate.state == STATE_STALE {
-        return prune_stale_worktree(repository, worktree);
+        return remove_stale_registration(repository, worktree);
     }
 
     let requested_path = match worktree.canonicalize() {
@@ -1145,7 +1576,7 @@ fn remove_prepared_worktree(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             if is_registered(repository, worktree) {
                 // The directory went but the registration stayed: that is a stale entry now.
-                return prune_stale_worktree(repository, worktree);
+                return remove_stale_registration(repository, worktree);
             }
             return WorktreeDeleteResult {
                 already_gone: true,
@@ -1186,19 +1617,87 @@ fn remove_prepared_worktree(
     }
 }
 
-/// Clear a registration whose directory is gone. `git worktree prune` only touches metadata in
-/// `.git/worktrees`, so it cannot destroy anything on disk.
-fn prune_stale_worktree(repository: &Path, worktree: &Path) -> WorktreeDeleteResult {
+/// Clear the registration of one stale worktree, and only that one.
+///
+/// This used to be `git worktree prune`, which clears *every* stale registration in the
+/// repository — including ones nobody selected, and ones whose folder is only temporarily out of
+/// reach on an unmounted volume. Both paths below touch nothing but this entry's metadata in
+/// `.git/worktrees`:
+///
+/// * folder missing: `git worktree remove`, without `-f`. Git accepts a missing folder and
+///   deletes just the entry; without `-f` it still refuses a locked one, and should the folder
+///   have come back as a real worktree in the meantime it refuses to lose changes there too.
+/// * folder present but prunable (its `.git` file is gone or points nowhere): Git refuses to
+///   remove it — correctly, it cannot vouch for the files — so the entry's own record is
+///   deleted, after checking that the record really points at this folder and is not locked.
+///   The folder and everything in it stay where they are.
+fn remove_stale_registration(repository: &Path, worktree: &Path) -> WorktreeDeleteResult {
     let path = worktree.to_string_lossy().to_string();
-    let _ = git_command(repository)
-        .args(["worktree", "prune"])
-        .output();
 
-    if is_registered(repository, worktree) {
-        failed_removal(path, "Git did not prune this stale worktree entry")
-    } else {
-        removed(path)
+    let git_error = match worktree.try_exists() {
+        Ok(false) => run_worktree_remove(repository, worktree, false).err(),
+        Ok(true) => None,
+        Err(error) => return failed_removal(path, format!("Cannot read worktree: {error}")),
+    };
+    if !is_registered(repository, worktree) {
+        return removed(path);
     }
+    if let Some(error) = git_error {
+        return failed_removal(path, error);
+    }
+
+    match remove_worktree_record(repository, worktree) {
+        Ok(()) if !is_registered(repository, worktree) => removed(path),
+        Ok(()) => failed_removal(path, "Git still lists this stale worktree entry"),
+        Err(error) => failed_removal(path, error),
+    }
+}
+
+/// Delete the `.git/worktrees/<name>` record that belongs to `worktree`, which is all a prune
+/// does for one entry. The record is identified by its `gitdir` file — the path Git wrote to
+/// the worktree's `.git` — never by its name, which Git may have suffixed to keep it unique.
+fn remove_worktree_record(repository: &Path, worktree: &Path) -> Result<(), String> {
+    let records = git_stdout(
+        repository,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .map(|common| PathBuf::from(common).join("worktrees"))
+    .ok_or_else(|| "Cannot locate the repository's worktree records".to_string())?;
+    let entries = fs::read_dir(&records)
+        .map_err(|error| format!("Cannot read the repository's worktree records: {error}"))?;
+
+    let canonical_worktree = worktree.canonicalize().ok();
+    for entry in entries.filter_map(Result::ok) {
+        let record = entry.path();
+        let Ok(recorded) = fs::read_to_string(record.join("gitdir")) else {
+            continue;
+        };
+        let recorded = Path::new(recorded.trim());
+        // Relative when the repository uses `worktree.useRelativePaths`; relative to the record.
+        let recorded = if recorded.is_absolute() {
+            recorded.to_path_buf()
+        } else {
+            record.join(recorded)
+        };
+        let Some(recorded_worktree) = recorded.parent() else {
+            continue;
+        };
+        let matches = recorded_worktree == worktree
+            || canonical_worktree.as_ref().is_some_and(|target| {
+                recorded_worktree.canonicalize().ok().as_ref() == Some(target)
+            });
+        if !matches {
+            continue;
+        }
+
+        if record.join("locked").exists() {
+            return Err("Worktree is locked".to_string());
+        }
+        return fs::remove_dir_all(&record)
+            .map_err(|error| format!("Cannot remove the stale worktree record: {error}"));
+    }
+
+    Err("Cannot find this worktree's record in the repository".to_string())
 }
 
 /// Single-worktree removal that collects the repository view itself. The batch command shares
@@ -1235,7 +1734,9 @@ fn discover_git_repositories(scan_path: &Path) -> Vec<PathBuf> {
 
             let file_name = entry.file_name();
             let name = file_name.to_string_lossy();
-            if name.starts_with('.') || name == "node_modules" {
+            // Only children are ever checked, so the folder the user picked is walked whatever
+            // its own name — scanning `~/.config` works.
+            if name == "node_modules" || SKIPPED_HIDDEN_DIRECTORIES.contains(&name.as_ref()) {
                 continue;
             }
             pending.push(entry.path());
@@ -1306,9 +1807,12 @@ fn scan_for_merged_worktrees_in(scan_path: &Path) -> Result<WorktreeScanResult, 
             .par_iter()
             .filter(|(_, resolvable)| *resolvable)
             .filter_map(|(repository, _)| {
-                fetch_repository(repository)
-                    .err()
-                    .map(|error| format!("{}: could not fetch, results may be stale ({error})", repository.display()))
+                fetch_repository(repository).err().map(|error| {
+                    format!(
+                        "{}: could not fetch, results may be stale ({error})",
+                        repository.display()
+                    )
+                })
             })
             .collect::<Vec<String>>()
     };
@@ -1319,47 +1823,62 @@ fn scan_for_merged_worktrees_in(scan_path: &Path) -> Result<WorktreeScanResult, 
         Err(_) => fetch(),
     };
 
+    // Repositories are independent of each other, so they are compared in parallel. The results
+    // are collected in discovery order and folded sequentially below, which keeps the report —
+    // and which duplicate wins — exactly as deterministic as the sequential loop was.
+    let scans: Vec<(PathBuf, Result<RepositoryScan, String>)> = repositories
+        .into_par_iter()
+        .map(|(repository, _resolvable)| {
+            let scan = collect_with_bases(&repository, None);
+            (repository, scan)
+        })
+        .collect();
+
     let mut diagnostics = Vec::new();
     let mut evaluated_repositories = 0;
     let mut repository_errors = Vec::new();
+    let mut comparison_warnings = Vec::new();
     let mut seen = HashSet::new();
     let mut worktrees = Vec::new();
 
-    for (repository, _resolvable) in repositories {
-        let candidates = match collect_with_bases(&repository, None) {
-            Ok((candidates, bases)) => {
-                evaluated_repositories += 1;
-                // Reported for the repositories that were actually compared. One with no linked
-                // worktrees never reaches a comparison, and claiming a base for it would be
-                // describing work that did not happen.
-                if let Some(bases) = bases.filter(|bases| !bases.branches.is_empty()) {
-                    diagnostics.push(format!(
-                        "{}: compared against {}{}",
-                        repository.display(),
-                        bases.branches.join(", "),
-                        if bases.used_local_fallback {
-                            " (local branches — no remote base found, these can be out of date)"
-                        } else {
-                            ""
-                        }
-                    ));
-                }
-                candidates
-            }
+    for (repository, scan) in scans {
+        let scan = match scan {
+            Ok(scan) => scan,
             Err(error) => {
                 repository_errors.push(format!("{}: {error}", repository.display()));
                 continue;
             }
         };
-        for mut candidate in candidates {
+        evaluated_repositories += 1;
+        // Reported for the repositories that were actually compared. One with no linked
+        // worktrees never reaches a comparison, and claiming a base for it would be describing
+        // work that did not happen.
+        if let Some(bases) = scan.bases.filter(|bases| !bases.branches.is_empty()) {
+            diagnostics.push(format!(
+                "{}: compared against {}{}",
+                repository.display(),
+                bases.branches.join(", "),
+                if bases.used_local_fallback {
+                    " (local branches — no remote base found, these can be out of date)"
+                } else {
+                    ""
+                }
+            ));
+        }
+        comparison_warnings.extend(scan.warnings);
+        for candidate in scan.candidates {
             let identity = (candidate.repository_path.clone(), candidate.path.clone());
-            if !seen.insert(identity) {
-                continue;
+            if seen.insert(identity) {
+                worktrees.push(candidate);
             }
-            candidate.size = calculate_dir_size(Path::new(&candidate.path));
-            worktrees.push(candidate);
         }
     }
+
+    // Walking each worktree's files is the slowest part of a scan and each walk is independent.
+    // Sizes are filled in place, so the order below is still decided only by the sort.
+    worktrees
+        .par_iter_mut()
+        .for_each(|worktree| worktree.size = calculate_dir_size(Path::new(&worktree.path)));
 
     if repository_count > 0 && evaluated_repositories == 0 {
         let detail = repository_errors
@@ -1379,6 +1898,7 @@ fn scan_for_merged_worktrees_in(scan_path: &Path) -> Result<WorktreeScanResult, 
         .sum();
 
     warnings.extend(repository_errors);
+    warnings.extend(comparison_warnings);
 
     Ok(WorktreeScanResult {
         worktrees,
@@ -1439,22 +1959,46 @@ pub(crate) fn count_removable_worktrees(root: &Path, cache: &mut VerdictCache) -
     removable
 }
 
+/// The scan runs hundreds of `git` processes and walks every worktree's files. Run inline in an
+/// `async` command it occupies one of the async runtime's few worker threads for all of that,
+/// and every other command queued behind it waits — so the blocking work goes to the blocking
+/// pool, and the command only awaits it.
 #[tauri::command]
 pub async fn scan_for_merged_worktrees(path: String) -> Result<WorktreeScanResult, String> {
-    scan_for_merged_worktrees_in(Path::new(&path))
+    tauri::async_runtime::spawn_blocking(move || scan_for_merged_worktrees_in(Path::new(&path)))
+        .await
+        .map_err(|error| format!("The worktree scan stopped unexpectedly: {error}"))?
 }
 
+/// Blocking for the same reason as the scan. Should the work itself die, every requested path is
+/// reported as failed: some may have been removed, but none of them can be confirmed, and a
+/// removal that cannot be confirmed is never claimed.
 #[tauri::command]
 pub async fn delete_merged_worktrees(removals: Vec<WorktreeRemoval>) -> Vec<WorktreeDeleteResult> {
-    delete_merged_worktrees_in(removals)
+    let paths: Vec<String> = removals
+        .iter()
+        .map(|removal| removal.worktree_path.clone())
+        .collect();
+    match tauri::async_runtime::spawn_blocking(move || delete_merged_worktrees_in(removals)).await {
+        Ok(results) => results,
+        Err(error) => paths
+            .into_iter()
+            .map(|path| failed_removal(path, format!("Removal stopped unexpectedly: {error}")))
+            .collect(),
+    }
 }
 
 /// Removals are grouped by repository so each repository is inspected once instead of once per
-/// worktree, and so the stale entries in it can be cleared with a single `git worktree prune`.
-/// Within a repository the removals stay sequential — they all contend for the same
+/// worktree. Within a repository the removals stay sequential — they all contend for the same
 /// `.git/worktrees` administrative files.
+///
+/// Nothing here runs `git worktree prune`. It used to, after every batch, and that cleared every
+/// stale registration in the repository whether or not anybody had selected it. `git worktree
+/// remove` already deletes the record of what it removes, and each selected stale entry is
+/// cleared on its own.
 fn delete_merged_worktrees_in(removals: Vec<WorktreeRemoval>) -> Vec<WorktreeDeleteResult> {
-    let mut results: Vec<Option<WorktreeDeleteResult>> = (0..removals.len()).map(|_| None).collect();
+    let mut results: Vec<Option<WorktreeDeleteResult>> =
+        (0..removals.len()).map(|_| None).collect();
     let mut order: Vec<String> = Vec::new();
     let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
 
@@ -1485,47 +2029,26 @@ fn delete_merged_worktrees_in(removals: Vec<WorktreeRemoval>) -> Vec<WorktreeDel
             }
         };
 
-        let mut stale_indices = Vec::new();
-        let mut removed_any = false;
-
         for index in indices {
             let removal = &removals[index];
             let worktree = Path::new(&removal.worktree_path);
-            if find_candidate(&candidates, worktree)
+            // Stale entries skip the HEAD comparison: there is no worktree left to read a HEAD
+            // from, and a folder without its `.git` file would answer with the HEAD of whatever
+            // repository encloses it.
+            let result = if find_candidate(&candidates, worktree)
                 .is_some_and(|candidate| candidate.state == STATE_STALE)
             {
-                stale_indices.push(index);
-                continue;
-            }
-
-            let result = remove_prepared_worktree(
-                &repository,
-                worktree,
-                Some(&removal.head),
-                removal.force,
-                &candidates,
-            );
-            removed_any |= result.success;
-            results[index] = Some(result);
-        }
-
-        if removed_any || !stale_indices.is_empty() {
-            let _ = git_command(&repository)
-                .args(["worktree", "prune"])
-                .output();
-        }
-
-        for index in stale_indices {
-            let worktree = Path::new(&removals[index].worktree_path);
-            let pruned = !is_registered(&repository, worktree);
-            results[index] = Some(if pruned {
-                removed(removals[index].worktree_path.clone())
+                remove_stale_registration(&repository, worktree)
             } else {
-                failed_removal(
-                    removals[index].worktree_path.clone(),
-                    "Git did not prune this stale worktree entry",
+                remove_prepared_worktree(
+                    &repository,
+                    worktree,
+                    Some(&removal.head),
+                    removal.force,
+                    &candidates,
                 )
-            });
+            };
+            results[index] = Some(result);
         }
     }
 
@@ -1546,12 +2069,11 @@ fn delete_merged_worktrees_in(removals: Vec<WorktreeRemoval>) -> Vec<WorktreeDel
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_status_output, collect_merged_worktrees,
-        count_removable_worktrees, delete_merged_worktrees_in, find_base_branches, is_ancestor,
-        BaseBranches, Verdict, VerdictCache,
-        is_junk_entry,
-        is_squash_merged, parse_worktree_porcelain, remove_merged_worktree, ScratchObjectDir,
-        scan_for_merged_worktrees_in, WorktreeRemoval,
+        classify_status_output, collect_merged_worktrees, count_removable_worktrees,
+        delete_merged_worktrees_in, find_base_branches, is_ancestor, is_junk_entry,
+        is_rebase_merged, is_squash_merged, parse_worktree_porcelain, remove_merged_worktree,
+        scan_for_merged_worktrees_in, BaseBranches, ScratchObjectDir, Verdict, VerdictCache,
+        WorktreeRemoval,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1625,6 +2147,18 @@ mod tests {
             worktree_path
         }
 
+        /// A worktree whose branch carries a commit of its own that `main` already has.
+        ///
+        /// A branch that never moved from where it was created is not offered as merged — it is
+        /// a worktree someone just started — so a test that needs a merged row has to give the
+        /// branch real work first.
+        fn add_merged_worktree(&self, branch: &str) -> PathBuf {
+            let worktree = self.add_feature_worktree(branch);
+            self.commit_file(&worktree, &format!("{}.txt", branch.replace('/', "-")));
+            self.git(&["merge", "--ff-only", branch]);
+            worktree
+        }
+
         fn commit_all(&self, message: &str) {
             self.git(&[
                 "-c",
@@ -1635,6 +2169,29 @@ mod tests {
                 "-m",
                 message,
             ]);
+        }
+
+        /// Run Git inside one of this repository's worktrees rather than the main one.
+        fn git_at(&self, directory: &Path, args: &[&str]) -> String {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(directory)
+                .args([
+                    "-c",
+                    "user.name=Node Modules Cleaner Tests",
+                    "-c",
+                    "user.email=tests@example.com",
+                ])
+                .args(args)
+                .output()
+                .expect("run git fixture command");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
         }
 
         fn head(&self) -> String {
@@ -1778,7 +2335,8 @@ mod tests {
 
         fs::write(worktree.join("uncommitted.txt"), "keep me\n")
             .expect("write uncommitted fixture");
-        let dirty_candidates = collect_merged_worktrees(repo.path(), None).expect("rescan worktrees");
+        let dirty_candidates =
+            collect_merged_worktrees(repo.path(), None).expect("rescan worktrees");
 
         assert_eq!(dirty_candidates.len(), 1);
         assert!(dirty_candidates[0].is_dirty);
@@ -1807,8 +2365,7 @@ mod tests {
     #[test]
     fn refuses_to_remove_merged_worktree_with_uncommitted_changes() {
         let repo = TestRepo::new();
-        let worktree = repo.add_feature_worktree("feature/keep-dirty");
-        repo.git(&["merge", "--ff-only", "feature/keep-dirty"]);
+        let worktree = repo.add_merged_worktree("feature/keep-dirty");
         fs::write(worktree.join("uncommitted.txt"), "keep me\n")
             .expect("write uncommitted fixture");
         let canonical_worktree = worktree.canonicalize().expect("canonical worktree path");
@@ -1831,10 +2388,8 @@ mod tests {
             std::process::id()
         ));
         let repo = TestRepo::new_at(scan_root.join("group").join("sample-repo"));
-        let clean_worktree = repo.add_feature_worktree("feature/clean");
-        repo.git(&["merge", "--ff-only", "feature/clean"]);
-        let dirty_worktree = repo.add_feature_worktree("feature/dirty");
-        repo.git(&["merge", "--ff-only", "feature/dirty"]);
+        let clean_worktree = repo.add_merged_worktree("feature/clean");
+        let dirty_worktree = repo.add_merged_worktree("feature/dirty");
         fs::write(dirty_worktree.join("uncommitted.txt"), "keep me\n")
             .expect("write uncommitted fixture");
 
@@ -1947,7 +2502,7 @@ mod tests {
     #[test]
     fn reports_and_refuses_to_remove_locked_worktree() {
         let repo = TestRepo::new();
-        let worktree = repo.add_feature_worktree("feature/locked");
+        let worktree = repo.add_merged_worktree("feature/locked");
         repo.git(&[
             "worktree",
             "lock",
@@ -1991,15 +2546,16 @@ mod tests {
             "refs/remotes/origin/HEAD",
             "refs/remotes/origin/main",
         ]);
-        repo.git(&["update-ref", "refs/remotes/origin/development", &feature_head]);
+        repo.git(&[
+            "update-ref",
+            "refs/remotes/origin/development",
+            &feature_head,
+        ]);
 
         let bases = find_base_branches(repo.path());
         assert_eq!(
             bases.branches,
-            vec![
-                "origin/main".to_string(),
-                "origin/development".to_string()
-            ]
+            vec!["origin/main".to_string(), "origin/development".to_string()]
         );
 
         let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
@@ -2040,7 +2596,8 @@ mod tests {
 
         let loose_before = repo.git(&["count-objects", "-v"]);
 
-        let scratch = ScratchObjectDir::new().expect("scratch object directory");
+        let scratch =
+            ScratchObjectDir::for_repository(repo.path()).expect("scratch object directory");
         assert!(is_squash_merged(
             repo.path(),
             &repo.git(&["rev-parse", "feature/probe"]),
@@ -2057,7 +2614,8 @@ mod tests {
         let worktree = repo.add_feature_worktree("feature/never-merged");
         repo.commit_file(&worktree, "open.txt");
 
-        let scratch = ScratchObjectDir::new().expect("scratch object directory");
+        let scratch =
+            ScratchObjectDir::for_repository(repo.path()).expect("scratch object directory");
         assert!(!is_squash_merged(
             repo.path(),
             &repo.git(&["rev-parse", "feature/never-merged"]),
@@ -2069,10 +2627,13 @@ mod tests {
     #[test]
     fn treats_operating_system_and_watcher_junk_as_removable_noise() {
         let repo = TestRepo::new();
-        let worktree = repo.add_feature_worktree("feature/junk");
-        repo.git(&["merge", "--ff-only", "feature/junk"]);
-        fs::write(worktree.join(".DS_Store"), "finder
-").expect("write junk fixture");
+        let worktree = repo.add_merged_worktree("feature/junk");
+        fs::write(
+            worktree.join(".DS_Store"),
+            "finder
+",
+        )
+        .expect("write junk fixture");
         fs::write(worktree.join(".watchman-cookie-host-1"), "").expect("write junk fixture");
 
         let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
@@ -2085,12 +2646,14 @@ mod tests {
     #[test]
     fn treats_other_untracked_files_as_real_changes() {
         let repo = TestRepo::new();
-        let worktree = repo.add_feature_worktree("feature/untracked-work");
-        repo.git(&["merge", "--ff-only", "feature/untracked-work"]);
+        let worktree = repo.add_merged_worktree("feature/untracked-work");
         fs::create_dir_all(worktree.join(".playwright-mcp")).expect("create fixture directory");
-        fs::write(worktree.join(".playwright-mcp").join("trace.log"), "log
-")
-            .expect("write untracked fixture");
+        fs::write(
+            worktree.join(".playwright-mcp").join("trace.log"),
+            "log
+",
+        )
+        .expect("write untracked fixture");
 
         let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
 
@@ -2158,14 +2721,16 @@ mod tests {
     #[test]
     fn reports_a_missing_worktree_directory_as_stale_and_prunes_it() {
         let repo = TestRepo::new();
-        let worktree = repo.add_feature_worktree("feature/stale");
-        repo.git(&["merge", "--ff-only", "feature/stale"]);
+        let worktree = repo.add_merged_worktree("feature/stale");
         fs::remove_dir_all(&worktree).expect("simulate a hand-deleted worktree directory");
 
         let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].state, "stale");
-        assert!(!candidates[0].is_dirty, "a missing directory is not dirty work");
+        assert!(
+            !candidates[0].is_dirty,
+            "a missing directory is not dirty work"
+        );
 
         let results = delete_merged_worktrees_in(vec![WorktreeRemoval {
             repository_path: candidates[0].repository_path.clone(),
@@ -2175,15 +2740,18 @@ mod tests {
         }]);
 
         assert_eq!(results.len(), 1);
-        assert!(results[0].success, "{}", results[0].error.clone().unwrap_or_default());
+        assert!(
+            results[0].success,
+            "{}",
+            results[0].error.clone().unwrap_or_default()
+        );
         assert!(!repo.git(&["worktree", "list"]).contains("feature/stale"));
     }
 
     #[test]
     fn removes_a_merged_worktree_that_only_junk_was_blocking() {
         let repo = TestRepo::new();
-        let worktree = repo.add_feature_worktree("feature/junk-blocked");
-        repo.git(&["merge", "--ff-only", "feature/junk-blocked"]);
+        let worktree = repo.add_merged_worktree("feature/junk-blocked");
         fs::write(worktree.join(".watchman-cookie-host-1"), "").expect("write junk fixture");
         let canonical_worktree = worktree.canonicalize().expect("canonical worktree path");
 
@@ -2205,8 +2773,7 @@ mod tests {
     #[test]
     fn does_not_force_removal_of_a_locked_worktree_that_only_holds_junk() {
         let repo = TestRepo::new();
-        let worktree = repo.add_feature_worktree("feature/locked-junk");
-        repo.git(&["merge", "--ff-only", "feature/locked-junk"]);
+        let worktree = repo.add_merged_worktree("feature/locked-junk");
         fs::write(worktree.join(".DS_Store"), "finder\n").expect("write junk fixture");
         repo.git(&[
             "worktree",
@@ -2230,8 +2797,7 @@ mod tests {
     #[test]
     fn refuses_to_remove_a_worktree_that_changed_since_the_scan() {
         let repo = TestRepo::new();
-        let worktree = repo.add_feature_worktree("feature/moved-on");
-        repo.git(&["merge", "--ff-only", "feature/moved-on"]);
+        let worktree = repo.add_merged_worktree("feature/moved-on");
         let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
         assert_eq!(candidates.len(), 1);
 
@@ -2256,8 +2822,7 @@ mod tests {
     #[test]
     fn treats_a_worktree_removed_elsewhere_as_already_gone() {
         let repo = TestRepo::new();
-        let worktree = repo.add_feature_worktree("feature/removed-elsewhere");
-        repo.git(&["merge", "--ff-only", "feature/removed-elsewhere"]);
+        let worktree = repo.add_merged_worktree("feature/removed-elsewhere");
         let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
         assert_eq!(candidates.len(), 1);
 
@@ -2271,7 +2836,11 @@ mod tests {
 
         let results = delete_merged_worktrees_in(vec![removal(&candidates[0], false)]);
 
-        assert!(results[0].success, "{}", results[0].error.clone().unwrap_or_default());
+        assert!(
+            results[0].success,
+            "{}",
+            results[0].error.clone().unwrap_or_default()
+        );
         assert!(results[0].already_gone);
         assert_eq!(results[0].error, None);
     }
@@ -2291,6 +2860,8 @@ mod tests {
             worktree.to_str().expect("UTF-8 fixture path"),
             "feature/sealed",
         ]);
+        repo.commit_file(&worktree, "sealed.txt");
+        repo.git(&["merge", "--ff-only", "feature/sealed"]);
         let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
         let candidate = candidates
             .iter()
@@ -2324,6 +2895,8 @@ mod tests {
             worktree.to_str().expect("UTF-8 fixture path"),
             "feature/sealed-pruned",
         ]);
+        repo.commit_file(&worktree, "sealed.txt");
+        repo.git(&["merge", "--ff-only", "feature/sealed-pruned"]);
         let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
         let candidate = candidates
             .iter()
@@ -2377,7 +2950,11 @@ mod tests {
 
         let results = delete_merged_worktrees_in(vec![removal(&candidates[0], true)]);
 
-        assert!(results[0].success, "{}", results[0].error.clone().unwrap_or_default());
+        assert!(
+            results[0].success,
+            "{}",
+            results[0].error.clone().unwrap_or_default()
+        );
         assert!(!results[0].already_gone);
         assert!(!worktree.exists());
         repo.git(&[
@@ -2391,10 +2968,12 @@ mod tests {
     #[test]
     fn refuses_a_dirty_worktree_nobody_agreed_to_lose() {
         let repo = TestRepo::new();
-        let worktree = repo.add_feature_worktree("feature/went-dirty");
-        repo.git(&["merge", "--ff-only", "feature/went-dirty"]);
+        let worktree = repo.add_merged_worktree("feature/went-dirty");
         let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
-        assert!(!candidates[0].is_dirty, "clean at scan time, so no consent was asked");
+        assert!(
+            !candidates[0].is_dirty,
+            "clean at scan time, so no consent was asked"
+        );
 
         fs::write(worktree.join("new-work.txt"), "keep me\n").expect("write new work");
         let results = delete_merged_worktrees_in(vec![removal(&candidates[0], false)]);
@@ -2410,8 +2989,7 @@ mod tests {
     #[test]
     fn consent_to_lose_changes_never_covers_a_newer_commit() {
         let repo = TestRepo::new();
-        let worktree = repo.add_feature_worktree("feature/committed-after");
-        repo.git(&["merge", "--ff-only", "feature/committed-after"]);
+        let worktree = repo.add_merged_worktree("feature/committed-after");
         fs::write(worktree.join("scratch.txt"), "scratch\n").expect("write scratch");
         let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
         assert!(candidates[0].is_dirty);
@@ -2430,8 +3008,7 @@ mod tests {
     #[test]
     fn consent_to_lose_changes_never_overrides_a_lock() {
         let repo = TestRepo::new();
-        let worktree = repo.add_feature_worktree("feature/locked-dirty");
-        repo.git(&["merge", "--ff-only", "feature/locked-dirty"]);
+        let worktree = repo.add_merged_worktree("feature/locked-dirty");
         fs::write(worktree.join("scratch.txt"), "scratch\n").expect("write scratch");
         repo.git(&[
             "worktree",
@@ -2479,7 +3056,8 @@ mod tests {
 
         // No commits, therefore no branches to compare against — but also nothing to clean,
         // so this must not surface as a scan failure.
-        let candidates = collect_merged_worktrees(&root, None).expect("repository without worktrees");
+        let candidates =
+            collect_merged_worktrees(&root, None).expect("repository without worktrees");
 
         assert!(candidates.is_empty());
         let _ = fs::remove_dir_all(root);
@@ -2494,23 +3072,19 @@ mod tests {
         ));
         let repo = TestRepo::new_at(scan_root.join("sample-repo"));
 
-        let removable = repo.add_feature_worktree("feature/removable");
-        repo.git(&["merge", "--ff-only", "feature/removable"]);
+        let removable = repo.add_merged_worktree("feature/removable");
 
-        let dirty = repo.add_feature_worktree("feature/dirty");
-        repo.git(&["merge", "--ff-only", "feature/dirty"]);
+        let dirty = repo.add_merged_worktree("feature/dirty");
         fs::write(dirty.join("work-in-progress.txt"), "keep me\n").expect("write dirty fixture");
 
-        let locked = repo.add_feature_worktree("feature/locked");
-        repo.git(&["merge", "--ff-only", "feature/locked"]);
+        let locked = repo.add_merged_worktree("feature/locked");
         repo.git(&[
             "worktree",
             "lock",
             locked.to_str().expect("UTF-8 fixture path"),
         ]);
 
-        let stale = repo.add_feature_worktree("feature/stale");
-        repo.git(&["merge", "--ff-only", "feature/stale"]);
+        let stale = repo.add_merged_worktree("feature/stale");
         fs::remove_dir_all(&stale).expect("simulate a hand-deleted worktree directory");
 
         let open = repo.add_feature_worktree("feature/open");
@@ -2550,9 +3124,8 @@ mod tests {
         use super::{git_spawn_count, with_background_git};
         use std::time::Instant;
 
-        let scan_path = std::env::var("WORKTREE_SCAN_PATH").unwrap_or_else(|_| {
-            format!("{}/Projects", std::env::var("HOME").unwrap_or_default())
-        });
+        let scan_path = std::env::var("WORKTREE_SCAN_PATH")
+            .unwrap_or_else(|_| format!("{}/Projects", std::env::var("HOME").unwrap_or_default()));
         let root = PathBuf::from(&scan_path);
 
         // Both policies, because they are not the same workload: the tray runs every Git child
@@ -2587,9 +3160,8 @@ mod tests {
     #[test]
     #[ignore]
     fn report_real_worktrees() {
-        let scan_path = std::env::var("WORKTREE_SCAN_PATH").unwrap_or_else(|_| {
-            format!("{}/Projects", std::env::var("HOME").unwrap_or_default())
-        });
+        let scan_path = std::env::var("WORKTREE_SCAN_PATH")
+            .unwrap_or_else(|_| format!("{}/Projects", std::env::var("HOME").unwrap_or_default()));
         let result =
             scan_for_merged_worktrees_in(Path::new(&scan_path)).expect("scan should succeed");
 
@@ -2613,14 +3185,18 @@ mod tests {
                 worktree.path,
             );
         }
-        eprintln!("{} worktrees, total {}", result.worktrees.len(), result.total_size);
+        eprintln!(
+            "{} worktrees, total {}",
+            result.worktrees.len(),
+            result.total_size
+        );
     }
 
     fn bases(tips: &[&str]) -> BaseBranches {
         BaseBranches {
             branches: vec!["origin/main".to_string()],
             tips: tips.iter().map(|tip| tip.to_string()).collect(),
-            used_local_fallback: false,
+            ..BaseBranches::default()
         }
     }
 
@@ -2733,7 +3309,7 @@ mod tests {
     fn a_cached_pass_reports_the_same_worktrees_as_an_uncached_one() {
         // The cache is allowed to remember verdicts, never to change them.
         let repo = TestRepo::new();
-        repo.add_feature_worktree("merged-branch");
+        repo.add_merged_worktree("merged-branch");
         repo.add_feature_worktree("open-branch");
         let worktree = repo.path().join("open-branch");
         repo.commit_file(&worktree, "work.txt");
@@ -2754,5 +3330,349 @@ mod tests {
         // The second pass answered entirely from memory.
         assert_eq!(cache.hits(), cache.considered());
         assert!(cache.considered() > 0);
+    }
+
+    fn scan_root(label: &str) -> PathBuf {
+        let id = TEST_REPO_ID.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "node-modules-cleaner-{label}-{}-{id}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn finds_repositories_inside_hidden_folders_below_the_root() {
+        // Worktree tools like to park checkouts in `.worktrees/` or `.claude/worktrees/`; skipping
+        // every dot-directory made all of them invisible. Package-manager and OS caches are still
+        // skipped by name, because they are large and never hold anybody's work.
+        let root = scan_root("hidden-subfolder");
+        let parked = root.join(".worktrees").join("parked-repo");
+        let cached = root.join(".cache").join("cached-repo");
+        fs::create_dir_all(parked.join(".git")).expect("create parked repository marker");
+        fs::create_dir_all(cached.join(".git")).expect("create cached repository marker");
+
+        let discovered = super::discover_git_repositories(&root);
+
+        assert!(discovered.contains(&parked), "{discovered:?}");
+        assert!(!discovered.contains(&cached), "{discovered:?}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scans_a_hidden_folder_picked_as_the_root() {
+        // The root is what the user picked; its own name is never a reason to skip it.
+        let root = scan_root("root").join(".config");
+        let repository = root.join("tool");
+        fs::create_dir_all(repository.join(".git")).expect("create repository marker");
+
+        let discovered = super::discover_git_repositories(&root);
+
+        assert_eq!(discovered, vec![repository]);
+        let _ = fs::remove_dir_all(root.parent().expect("fixture parent"));
+    }
+
+    #[test]
+    fn detects_a_rebase_merged_branch() {
+        // "Rebase and merge" replays each commit onto the base with new hashes: the branch is not
+        // an ancestor, and its combined diff matches none of the replayed commits one by one.
+        let repo = TestRepo::new();
+        let worktree = repo.add_feature_worktree("feature/rebased");
+        repo.commit_file(&worktree, "first.txt");
+        repo.commit_file(&worktree, "second.txt");
+        let first = repo.git(&["rev-parse", "feature/rebased~1"]);
+        let second = repo.git(&["rev-parse", "feature/rebased"]);
+
+        // The base moved on first, so the replayed commits cannot come out with the same hashes.
+        fs::write(repo.path().join("unrelated.txt"), "unrelated\n").expect("write fixture");
+        repo.git(&["add", "unrelated.txt"]);
+        repo.commit_all("unrelated");
+        repo.git_at(repo.path(), &["cherry-pick", &first, &second]);
+        assert!(!is_ancestor(repo.path(), "feature/rebased", "main").expect("ancestry check"));
+
+        let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].branch, "feature/rebased");
+        assert_eq!(candidates[0].state, "squashed");
+    }
+
+    #[test]
+    fn detects_a_squash_merge_that_landed_after_the_base_moved() {
+        // The squash probe compares patch ids, and a patch id includes its context lines. When the
+        // base edits a line right next to the branch's change before the squash lands, the two
+        // diffs carry different context and the probe no longer recognises its own work.
+        let repo = TestRepo::new();
+        let lines: String = (1..=20).map(|line| format!("{line}\n")).collect();
+        fs::write(repo.path().join("numbers.txt"), &lines).expect("write fixture");
+        repo.git(&["add", "numbers.txt"]);
+        repo.commit_all("numbers");
+
+        let worktree = repo.add_feature_worktree("feature/late-squash");
+        fs::write(
+            worktree.join("numbers.txt"),
+            lines.replace("\n10\n", "\nten\n"),
+        )
+        .expect("edit on the branch");
+        repo.git_at(&worktree, &["commit", "-am", "spell out ten"]);
+
+        fs::write(
+            repo.path().join("numbers.txt"),
+            lines.replace("\n8\n", "\neight\n"),
+        )
+        .expect("edit on the base");
+        repo.git_at(repo.path(), &["commit", "-am", "spell out eight"]);
+        repo.git(&["merge", "--squash", "feature/late-squash"]);
+        repo.commit_all("squashed late");
+
+        let scratch = ScratchObjectDir::for_repository(repo.path()).expect("scratch");
+        assert!(
+            !is_squash_merged(
+                repo.path(),
+                &repo.git(&["rev-parse", "feature/late-squash"]),
+                "main",
+                &scratch
+            ),
+            "the patch-id probe alone must miss this case, or the test proves nothing"
+        );
+        let loose_before = repo.git(&["count-objects", "-v"]);
+
+        let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].branch, "feature/late-squash");
+        assert_eq!(candidates[0].state, "squashed");
+        // The merge that proves it is computed in the scratch object directory.
+        assert_eq!(repo.git(&["count-objects", "-v"]), loose_before);
+    }
+
+    #[test]
+    fn finds_a_branch_merged_into_a_remote_not_named_origin() {
+        let repo = TestRepo::new();
+        let worktree = repo.add_feature_worktree("feature/upstream");
+        repo.commit_file(&worktree, "upstream.txt");
+        let feature_head = repo.git(&["rev-parse", "feature/upstream"]);
+        let url = repo.path().to_string_lossy().to_string();
+        repo.git(&["remote", "add", "upstream", &url]);
+        repo.git(&["update-ref", "refs/remotes/upstream/main", &feature_head]);
+        repo.git(&[
+            "symbolic-ref",
+            "refs/remotes/upstream/HEAD",
+            "refs/remotes/upstream/main",
+        ]);
+
+        let bases = find_base_branches(repo.path());
+        assert_eq!(bases.branches, vec!["upstream/main".to_string()]);
+        assert!(!bases.used_local_fallback);
+
+        let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].branch, "feature/upstream");
+        assert_eq!(candidates[0].base_branch, "upstream/main");
+    }
+
+    #[test]
+    fn never_offers_the_worktree_that_holds_a_base_branch_of_another_remote() {
+        // The same guard as for `origin`: a worktree sitting on `main` is trivially "merged" into
+        // `upstream/main`, and it is the last thing that should be offered for deletion.
+        let repo = TestRepo::new();
+        let url = repo.path().to_string_lossy().to_string();
+        repo.git(&["remote", "add", "upstream", &url]);
+        repo.git(&["update-ref", "refs/remotes/upstream/trunk", "HEAD"]);
+        repo.git(&[
+            "symbolic-ref",
+            "refs/remotes/upstream/HEAD",
+            "refs/remotes/upstream/trunk",
+        ]);
+        let worktree = repo.add_feature_worktree("trunk");
+        repo.commit_file(&worktree, "trunk.txt");
+        let head = repo.git(&["rev-parse", "trunk"]);
+        repo.git(&["update-ref", "refs/remotes/upstream/trunk", &head]);
+
+        let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
+
+        assert!(candidates.is_empty(), "{candidates:?}");
+    }
+
+    #[test]
+    fn a_broken_base_does_not_hide_the_repository() {
+        let root = scan_root("broken-base");
+        let repo = TestRepo::new_at(root.join("repo"));
+        let worktree = repo.add_feature_worktree("feature/landed");
+        repo.commit_file(&worktree, "landed.txt");
+        let feature_head = repo.git(&["rev-parse", "feature/landed"]);
+        // A ref pointing at a tree: it lists fine, and every comparison against it fails.
+        let tree = repo.git(&["rev-parse", "HEAD^{tree}"]);
+        repo.git(&["update-ref", "refs/remotes/origin/main", &tree]);
+        repo.git(&[
+            "update-ref",
+            "refs/remotes/origin/development",
+            &feature_head,
+        ]);
+
+        let result = scan_for_merged_worktrees_in(&root).expect("scan with one broken base");
+
+        assert_eq!(result.worktrees.len(), 1, "{:?}", result.warnings);
+        assert_eq!(result.worktrees[0].base_branch, "origin/development");
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("origin/main")),
+            "{:?}",
+            result.warnings
+        );
+
+        drop(repo);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_repository_whose_only_base_is_broken_is_still_an_error() {
+        // With nothing left to compare against, "not merged" would be a guess; the repository
+        // is reported as unscannable instead.
+        let repo = TestRepo::new();
+        let worktree = repo.add_feature_worktree("feature/nowhere");
+        repo.commit_file(&worktree, "nowhere.txt");
+        let tree = repo.git(&["rev-parse", "HEAD^{tree}"]);
+        repo.git(&["update-ref", "refs/remotes/origin/main", &tree]);
+
+        let error = collect_merged_worktrees(repo.path(), None)
+            .expect_err("no usable base is an error, not an empty result");
+
+        assert!(error.contains("git merge-base failed"), "{error}");
+    }
+
+    #[test]
+    fn a_worktree_that_was_just_created_is_not_offered_as_merged() {
+        // Its HEAD is the base tip it was branched from, which makes it an ancestor of the base —
+        // but nothing was ever merged; somebody has only just started work there.
+        let repo = TestRepo::new();
+        repo.add_feature_worktree("feature/just-started");
+
+        let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
+
+        assert!(candidates.is_empty(), "{candidates:?}");
+    }
+
+    #[test]
+    fn an_untouched_worktree_the_base_has_moved_past_is_offered() {
+        // Branched, never committed to, and then left behind while the base moved on: nothing
+        // in it is lost by removing it, and this is exactly the abandoned checkout the tool is
+        // for. Only a worktree still sitting on the base tip is someone's fresh start.
+        let repo = TestRepo::new();
+        let worktree = repo.add_feature_worktree("feature/abandoned");
+        repo.commit_file(repo.path(), "later.txt");
+
+        let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
+
+        assert_eq!(candidates.len(), 1, "{candidates:?}");
+        assert_eq!(
+            fs::canonicalize(&candidates[0].path).expect("candidate path"),
+            fs::canonicalize(&worktree).expect("worktree path"),
+        );
+    }
+
+    #[test]
+    fn removing_one_stale_entry_leaves_the_other_stale_entries_alone() {
+        // `git worktree prune` clears every stale registration in the repository. Only the ones
+        // the user selected may go.
+        let repo = TestRepo::new();
+        let selected = repo.add_merged_worktree("feature/stale-selected");
+        let other = repo.add_merged_worktree("feature/stale-other");
+        fs::remove_dir_all(&selected).expect("remove selected worktree directory");
+        fs::remove_dir_all(&other).expect("remove other worktree directory");
+        let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.branch == "feature/stale-selected")
+            .expect("selected stale entry")
+            .clone();
+        assert_eq!(candidate.state, "stale");
+
+        let results = delete_merged_worktrees_in(vec![removal(&candidate, false)]);
+
+        assert!(results[0].success, "{:?}", results[0]);
+        let listing = repo.git(&["worktree", "list", "--porcelain"]);
+        assert!(!listing.contains("feature/stale-selected"), "{listing}");
+        assert!(listing.contains("feature/stale-other"), "{listing}");
+    }
+
+    #[test]
+    fn a_stale_entry_whose_folder_still_exists_is_unregistered_without_touching_the_folder() {
+        // Git calls a worktree prunable when its `.git` file is gone even though the folder is
+        // still there. Removing the registration must never take the folder's files with it.
+        let repo = TestRepo::new();
+        let worktree = repo.add_merged_worktree("feature/orphaned");
+        fs::remove_file(worktree.join(".git")).expect("remove the worktree's .git file");
+        fs::write(worktree.join("keep.txt"), "keep me\n").expect("write keep file");
+        let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.branch == "feature/orphaned")
+            .expect("orphaned entry")
+            .clone();
+        assert_eq!(candidate.state, "stale");
+
+        let results = delete_merged_worktrees_in(vec![removal(&candidate, false)]);
+
+        assert!(results[0].success, "{:?}", results[0]);
+        assert!(worktree.join("keep.txt").exists());
+        assert!(!repo
+            .git(&["worktree", "list", "--porcelain"])
+            .contains("feature/orphaned"));
+    }
+
+    #[test]
+    fn the_rebase_check_needs_every_commit_to_be_on_the_base() {
+        // One replayed commit out of two is not "merged": the other one's work exists only here.
+        let repo = TestRepo::new();
+        let worktree = repo.add_feature_worktree("feature/half-landed");
+        repo.commit_file(&worktree, "landed.txt");
+        repo.commit_file(&worktree, "not-landed.txt");
+        let landed = repo.git(&["rev-parse", "feature/half-landed~1"]);
+        fs::write(repo.path().join("unrelated.txt"), "unrelated\n").expect("write fixture");
+        repo.git(&["add", "unrelated.txt"]);
+        repo.commit_all("unrelated");
+        repo.git_at(repo.path(), &["cherry-pick", &landed]);
+
+        assert!(!is_rebase_merged(
+            repo.path(),
+            "feature/half-landed",
+            "main"
+        ));
+
+        let rest = repo.git(&["rev-parse", "feature/half-landed"]);
+        repo.git_at(repo.path(), &["cherry-pick", &rest]);
+        assert!(is_rebase_merged(repo.path(), "feature/half-landed", "main"));
+    }
+
+    #[test]
+    fn a_git_failure_without_stderr_still_explains_itself() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let status = std::process::ExitStatus::from_raw(1 << 8);
+
+        assert_eq!(
+            super::failure_detail(b"  \n", status, "git worktree remove"),
+            "git worktree remove exited with status 1"
+        );
+        assert_eq!(
+            super::failure_detail(b"fatal: locked\n", status, "git worktree remove"),
+            "fatal: locked"
+        );
+    }
+
+    #[test]
+    fn a_just_created_worktree_stays_hidden_after_its_branch_is_renamed() {
+        // Tools that name a branch after the fact (t3code does) rename it right after creating
+        // it. A rename moves nothing, so the branch still has no work of its own.
+        let repo = TestRepo::new();
+        repo.add_feature_worktree("feature/placeholder");
+        repo.git(&["branch", "-m", "feature/placeholder", "feature/real-name"]);
+
+        let candidates = collect_merged_worktrees(repo.path(), None).expect("scan worktrees");
+
+        assert!(candidates.is_empty(), "{candidates:?}");
     }
 }

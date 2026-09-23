@@ -49,11 +49,10 @@ function GearIcon({ className }: { className?: string }) {
 }
 
 function App() {
-  const cleanup = useCleanup();
   const caches = useDevCaches();
+  const cleanup = useCleanup(caches);
   const settings = useSettings();
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
-  const [showCacheDialog, setShowCacheDialog] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const {
     nodeModules,
@@ -61,23 +60,20 @@ function App() {
     scanPath,
     isScanning,
     isDeleting,
+    canDelete,
     summary,
     totalSize,
     selectedWorktreesNeedingConsent,
     trayMismatch,
     removableWorktreeCount,
-    error,
+    errors,
+    lastReport,
   } = cleanup;
   const needsConsent = selectedWorktreesNeedingConsent.length > 0;
 
   const confirmDelete = () => {
     setShowConfirmDialog(false);
     void cleanup.deleteSelected();
-  };
-
-  const confirmCacheCleanup = () => {
-    setShowCacheDialog(false);
-    void caches.cleanSelected();
   };
 
   // Caches live at fixed locations, so this panel works before any folder is picked.
@@ -92,25 +88,17 @@ function App() {
         onSelectSafe={caches.selectSafe}
         onDeselectAll={caches.deselectAll}
         onScan={() => void caches.scan()}
-        selectionDisabled={caches.isCleaning}
+        prunedPaths={caches.prunedPaths}
+        selectionDisabled={isDeleting}
       />
       {caches.selectedIds.size > 0 && (
-        <div className="flex items-center justify-between gap-4 px-4 py-3 bg-sky-50/70 border-t border-sky-100">
-          <span className="text-sm text-gray-600">
-            {caches.selectedIds.size} selected &middot;{' '}
-            <span className="font-medium text-green-700">
-              {formatSize(caches.selectedReclaimable)}
-            </span>{' '}
-            will be freed{caches.selectionHasEstimate ? ' at least — prune targets free an amount known only once they run' : ''}
-          </span>
-          <button
-            type="button"
-            onClick={() => setShowCacheDialog(true)}
-            disabled={caches.isCleaning}
-            className="px-3 py-1.5 bg-sky-600 text-white text-sm font-medium rounded-lg hover:bg-sky-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
-          >
-            {caches.isCleaning ? (<><Spinner />Cleaning...</>) : 'Clean selected'}
-          </button>
+        <div className="px-4 py-3 bg-sky-50/70 border-t border-sky-100 text-sm text-gray-600">
+          {caches.selectedIds.size} selected &middot;{' '}
+          <span className="font-medium text-green-700">
+            {formatSize(caches.selectedReclaimable)}
+          </span>{' '}
+          will be freed{caches.selectionHasEstimate ? ' at least — prune targets free an amount known only once they run' : ''}
+          {' '}&middot; removed with the rest by Remove Selected
         </div>
       )}
       {caches.freedBytes > 0 && (
@@ -170,12 +158,34 @@ function App() {
         </div>
       </header>
 
-      {(error || caches.error) && (
-        <div className="bg-red-50 border-b border-red-200 px-6 py-3 flex items-center justify-between gap-4">
-          <span className="text-red-700 text-sm">{error ?? caches.error}</span>
+      {lastReport && lastReport.length > 0 && (
+        <div className="bg-green-50 border-b border-green-200 px-6 py-3 flex items-start justify-between gap-4">
+          <ul className="text-green-800 text-sm space-y-0.5" aria-live="polite">
+            {lastReport.map((line) => <li key={line}>{line}</li>)}
+          </ul>
           <button
             type="button"
-            onClick={() => { cleanup.clearError(); caches.clearError(); }}
+            onClick={cleanup.clearReport}
+            className="text-green-600 hover:text-green-800"
+            aria-label="Dismiss cleanup summary"
+          >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      )}
+
+      {errors.length > 0 && (
+        <div className="bg-red-50 border-b border-red-200 px-6 py-3 flex items-start justify-between gap-4 max-h-60 overflow-y-auto">
+          <div className="text-red-700 text-sm space-y-2 min-w-0 break-words">
+            {errors.map((message) => (
+              <p key={message} className="whitespace-pre-line">{message}</p>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={cleanup.clearError}
             className="text-red-500 hover:text-red-700"
             aria-label="Dismiss error"
           >
@@ -285,6 +295,7 @@ function App() {
                 onToggleSelection={mergedWorktrees.toggleSelection}
                 onSelectAll={mergedWorktrees.selectAll}
                 onDeselectAll={mergedWorktrees.deselectAll}
+                blockedReasons={mergedWorktrees.blockedReasons}
                 selectionDisabled={isDeleting || isScanning}
               />
               {mergedWorktrees.diagnostics.length > 0 && (
@@ -306,7 +317,7 @@ function App() {
         )}
       </main>
 
-      {summary.totalCount > 0 && (
+      {(summary.totalCount > 0 || isDeleting) && (
         <footer className="bg-white border-t border-gray-200 px-6 py-4">
           <div className="flex items-center justify-between">
             <div className="text-sm">
@@ -316,12 +327,14 @@ function App() {
               </span>
               <span className="text-gray-300 mx-2">|</span>
               <span className="text-gray-500">Space to free: </span>
-              <span className="font-medium text-green-600">{formatSize(summary.totalSize)}</span>
+              <span className="font-medium text-green-600">
+                {summary.hasEstimate ? 'at least ' : ''}{formatSize(summary.totalSize)}
+              </span>
             </div>
             <button
               type="button"
               onClick={() => setShowConfirmDialog(true)}
-              disabled={isDeleting || isScanning}
+              disabled={!canDelete}
               className="px-4 py-2 bg-red-600 text-white font-medium rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
             >
               {isDeleting ? (
@@ -357,10 +370,11 @@ function App() {
       <ConfirmDialog
         isOpen={showConfirmDialog}
         title="Remove selected items?"
-        description="node_modules folders are deleted permanently. Worktree files, including ignored files and untracked OS/watcher junk, are removed; Git branches are kept. Entries whose directory is already gone only have their leftover Git registration pruned."
+        description="node_modules folders are deleted permanently. Worktree files, including ignored files and untracked OS/watcher junk, are removed; Git branches are kept. Entries whose directory is already gone only have their leftover Git registration pruned. Developer caches are re-downloaded on demand; entries with an official prune command are handed to that tool, which keeps whatever is still referenced, and logs are emptied in place."
         items={summary.items}
         confirmLabel={needsConsent ? 'Remove and discard changes' : 'Remove'}
         selectedSize={summary.totalSize}
+        sizeIsEstimate={summary.hasEstimate}
         warning={needsConsent ? {
           message: `${selectedWorktreesNeedingConsent.length} worktree(s) have uncommitted changes. Those changes will be lost — they are not in any commit:`,
           entries: selectedWorktreesNeedingConsent.map((worktree) => ({
@@ -373,16 +387,6 @@ function App() {
         onCancel={() => setShowConfirmDialog(false)}
       />
 
-      <ConfirmDialog
-        isOpen={showCacheDialog}
-        title="Clean selected caches?"
-        description="Caches are re-downloaded on demand. Entries marked with an official prune command are handed to that tool, which keeps whatever is still referenced. Logs are emptied in place rather than deleted."
-        items={[{ label: 'cache targets', count: caches.selectedIds.size }]}
-        confirmLabel="Clean"
-        selectedSize={caches.selectedReclaimable}
-        onConfirm={confirmCacheCleanup}
-        onCancel={() => setShowCacheDialog(false)}
-      />
     </div>
   );
 }

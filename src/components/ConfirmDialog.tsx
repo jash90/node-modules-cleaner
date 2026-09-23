@@ -12,6 +12,8 @@ interface ConfirmDialogProps {
   items: Array<{ label: string; count: number }>;
   confirmLabel: string;
   selectedSize: number;
+  /** The size is a floor, e.g. a cache pruned by its own tool frees an amount known only after. */
+  sizeIsEstimate?: boolean;
   /** Named, not counted: consent to lose work should be given for specific things. */
   warning?: ConfirmDialogWarning | null;
   onConfirm: () => void;
@@ -25,6 +27,7 @@ export function ConfirmDialog({
   items,
   confirmLabel,
   selectedSize,
+  sizeIsEstimate = false,
   warning = null,
   onConfirm,
   onCancel,
@@ -68,7 +71,9 @@ export function ConfirmDialog({
           ))}
           <div className="flex justify-between text-sm border-t border-gray-200 pt-2 mt-1">
             <span className="text-gray-600">Space to free:</span>
-            <span className="font-medium text-green-600">{formatSize(selectedSize)}</span>
+            <span className="font-medium text-green-600">
+              {sizeIsEstimate ? 'at least ' : ''}{formatSize(selectedSize)}
+            </span>
           </div>
         </div>
 

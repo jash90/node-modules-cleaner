@@ -2,18 +2,23 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
+import type { useDevCaches } from './useDevCaches';
 import { useMergedWorktrees } from './useMergedWorktrees';
-import { useNodeModules } from './useNodeModules';
+import { useNodeModules, type NodeModulesDeletion } from './useNodeModules';
 import {
+  countOutcome,
   countRemovableWorktrees,
   createCleanupSummary,
   detectTrayMismatch,
+  formatCleanupReport,
   isSelectableWorktree,
   runCleanupDeletion,
   runCleanupScans,
+  runUnifiedCleanup,
   worktreesNeedingConsent,
 } from '../utils/cleanupSummary';
-import type { NodeModulesFolder, TrayStats } from '../types';
+import { formatSize } from '../utils/formatSize';
+import type { TrayStats, WorktreeDeleteResult } from '../types';
 
 /**
  * Ask the menu bar to recount. The count doubles as a check on the window's own list, and a
@@ -23,7 +28,11 @@ function refreshTray() {
   void invoke('refresh_tray_now').catch(() => {});
 }
 
-export function useCleanup() {
+/**
+ * Coordinates all three cleanup categories behind one "Remove Selected". The cache hook is
+ * passed in rather than created here because its panel also works with no folder scanned.
+ */
+export function useCleanup(caches: ReturnType<typeof useDevCaches>) {
   const nodeModules = useNodeModules();
   const mergedWorktrees = useMergedWorktrees();
   const scanNodeModules = nodeModules.scan;
@@ -33,6 +42,17 @@ export function useCleanup() {
   const deleteMergedWorktrees = mergedWorktrees.deleteSelected;
   const clearNodeModulesError = nodeModules.clearError;
   const clearMergedWorktreesError = mergedWorktrees.clearError;
+  const blockedWorktrees = mergedWorktrees.blockedReasons;
+  const {
+    targets: cacheTargets,
+    selectedIds: selectedCachePaths,
+    isCleaning: isCleaningCaches,
+    isScanning: isScanningCaches,
+    error: cachesError,
+    cleanSelected: cleanCaches,
+    clearError: clearCachesError,
+  } = caches;
+  const [lastReport, setLastReport] = useState<string[] | null>(null);
   const [scanPath, setScanPath] = useState<string | null>(null);
   const [isSelectingDirectory, setIsSelectingDirectory] = useState(false);
   const [isCoordinatingDeletion, setIsCoordinatingDeletion] = useState(false);
@@ -57,7 +77,15 @@ export function useCleanup() {
     || mergedWorktrees.isScanning;
   const isDeleting = isCoordinatingDeletion
     || nodeModules.isDeleting
-    || mergedWorktrees.isDeleting;
+    || mergedWorktrees.isDeleting
+    || isCleaningCaches;
+  // Kept apart from `isScanning`, which drives the full-page scan screen for the folder scan.
+  const canDelete = !isDeleting && !isScanning && !isScanningCaches;
+
+  const selectedCaches = useMemo(
+    () => cacheTargets.filter((target) => selectedCachePaths.has(target.path)),
+    [cacheTargets, selectedCachePaths],
+  );
 
   const summary = useMemo(() => createCleanupSummary({
     nodeModules: nodeModules.folders.filter((folder) => (
@@ -66,17 +94,25 @@ export function useCleanup() {
     worktrees: mergedWorktrees.worktrees.filter((worktree) => (
       mergedWorktrees.selectedPaths.has(worktree.path)
     )),
+    caches: selectedCaches.map((target) => ({
+      path: target.path,
+      size: target.reclaimable_size,
+      isEstimate: target.cleanup.type === 'external_command',
+    })),
   }), [
     mergedWorktrees.selectedPaths,
     mergedWorktrees.worktrees,
     nodeModules.folders,
     nodeModules.selectedPaths,
+    selectedCaches,
   ]);
 
   const availableSummary = useMemo(() => createCleanupSummary({
     nodeModules: nodeModules.folders,
-    worktrees: mergedWorktrees.worktrees.filter(isSelectableWorktree),
-  }), [mergedWorktrees.worktrees, nodeModules.folders]);
+    worktrees: mergedWorktrees.worktrees.filter((worktree) => (
+      isSelectableWorktree(worktree) && !blockedWorktrees.has(worktree.path)
+    )),
+  }), [blockedWorktrees, mergedWorktrees.worktrees, nodeModules.folders]);
 
   const selectedWorktreesNeedingConsent = useMemo(() => worktreesNeedingConsent(
     mergedWorktrees.worktrees.filter((worktree) => (
@@ -89,6 +125,7 @@ export function useCleanup() {
 
     setIsSelectingDirectory(true);
     setPickerError(null);
+    setLastReport(null);
 
     try {
       const selected = await open({
@@ -114,6 +151,7 @@ export function useCleanup() {
   /** Scan the same folder again, without going through the picker. */
   const rescan = useCallback(async () => {
     if (!scanPath || isScanning || isDeleting) return;
+    setLastReport(null);
     await runCleanupScans(scanPath, scanNodeModules, scanMergedWorktrees);
     setListBuiltAt(Date.now());
     refreshTray();
@@ -133,12 +171,7 @@ export function useCleanup() {
   });
 
   const deleteSelected = useCallback(async () => {
-    if (
-      summary.totalCount === 0
-      || deletionInProgress.current
-      || isDeleting
-      || isScanning
-    ) return;
+    if (summary.totalCount === 0 || deletionInProgress.current || !canDelete) return;
 
     const nodeModulePaths = nodeModules.folders
       .filter((folder) => nodeModules.selectedPaths.has(folder.path))
@@ -146,23 +179,44 @@ export function useCleanup() {
     const selectedWorktrees = mergedWorktrees.worktrees.filter((worktree) => (
       mergedWorktrees.selectedPaths.has(worktree.path)
     ));
+    const requested = {
+      nodeModules: nodeModulePaths.length,
+      worktrees: selectedWorktrees.length,
+      caches: selectedCaches.length,
+    };
 
     deletionInProgress.current = true;
     setIsCoordinatingDeletion(true);
-
-    let deletedFolders: NodeModulesFolder[] = [];
+    setLastReport(null);
 
     try {
-      await runCleanupDeletion(
-        () => deleteNodeModules(nodeModulePaths),
-        (folders) => {
-          deletedFolders = folders;
+      const report = await runUnifiedCleanup(
+        async () => {
+          let deletion: NodeModulesDeletion = { results: [], deletedFolders: [] };
+          let worktreeResults: WorktreeDeleteResult[] = [];
+          await runCleanupDeletion(
+            () => deleteNodeModules(nodeModulePaths),
+            (result) => {
+              deletion = result;
+            },
+            () => deleteMergedWorktrees(selectedWorktrees, deletion.deletedFolders),
+            (results) => {
+              worktreeResults = results;
+              reconcileNodeModules(
+                deletion.deletedFolders,
+                results.filter((result) => result.success).map((result) => result.path),
+              );
+            },
+          );
+          return {
+            nodeModules: countOutcome(requested.nodeModules, deletion.results),
+            worktrees: countOutcome(requested.worktrees, worktreeResults),
+          };
         },
-        () => deleteMergedWorktrees(selectedWorktrees, deletedFolders),
-        (removedWorktreePaths) => {
-          reconcileNodeModules(deletedFolders, removedWorktreePaths);
-        },
+        async () => countOutcome(requested.caches, await cleanCaches()),
+        requested,
       );
+      setLastReport(formatCleanupReport(report, formatSize));
     } finally {
       deletionInProgress.current = false;
       setIsCoordinatingDeletion(false);
@@ -171,8 +225,8 @@ export function useCleanup() {
       refreshTray();
     }
   }, [
-    isDeleting,
-    isScanning,
+    canDelete,
+    cleanCaches,
     deleteMergedWorktrees,
     deleteNodeModules,
     mergedWorktrees.selectedPaths,
@@ -180,6 +234,7 @@ export function useCleanup() {
     nodeModules.folders,
     nodeModules.selectedPaths,
     reconcileNodeModules,
+    selectedCaches.length,
     summary.totalCount,
   ]);
 
@@ -187,11 +242,12 @@ export function useCleanup() {
     setPickerError(null);
     clearNodeModulesError();
     clearMergedWorktreesError();
-  }, [clearMergedWorktreesError, clearNodeModulesError]);
+    clearCachesError();
+  }, [clearCachesError, clearMergedWorktreesError, clearNodeModulesError]);
 
-  const error = [pickerError, nodeModules.error, mergedWorktrees.error]
-    .filter(Boolean)
-    .join(' ') || null;
+  // Every source is shown: one category's failure must not hide another's.
+  const errors = [pickerError, nodeModules.error, mergedWorktrees.error, cachesError]
+    .filter((message): message is string => Boolean(message));
 
   return {
     nodeModules,
@@ -199,15 +255,18 @@ export function useCleanup() {
     scanPath,
     isScanning,
     isDeleting,
+    canDelete,
     summary,
     totalSize: availableSummary.totalSize,
     selectedWorktreesNeedingConsent,
     trayMismatch,
     removableWorktreeCount: windowCount,
-    error,
+    errors,
+    lastReport,
     scan,
     rescan,
     deleteSelected,
     clearError,
+    clearReport: () => setLastReport(null),
   };
 }

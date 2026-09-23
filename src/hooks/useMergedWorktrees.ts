@@ -7,7 +7,13 @@ import type {
   WorktreeRemoval,
   WorktreeScanResult,
 } from '../types';
-import { adjustWorktreeSizes, isSelectableWorktree } from '../utils/cleanupSummary';
+import {
+  adjustWorktreeSizes,
+  applyWorktreeFailures,
+  describeFailures,
+  isSelectableWorktree,
+  worktreeFailures,
+} from '../utils/cleanupSummary';
 
 export function useMergedWorktrees() {
   const [worktrees, setWorktrees] = useState<MergedWorktree[]>([]);
@@ -20,6 +26,9 @@ export function useMergedWorktrees() {
   // Distinct from `error`, which also carries per-repository warnings from a scan that worked.
   const [scanFailed, setScanFailed] = useState(false);
   const [diagnostics, setDiagnostics] = useState<string[]>([]);
+  // Rows a removal refused because they stopped being safe to remove since the scan; the same
+  // click would fail again, so they stay visible with the reason but cannot be selected.
+  const [blockedReasons, setBlockedReasons] = useState<Map<string, string>>(new Map());
 
   const scan = useCallback(async (path: string) => {
     if (isScanning || isDeleting) return;
@@ -31,6 +40,7 @@ export function useMergedWorktrees() {
     setSelectedPaths(new Set());
     setTotalSize(0);
     setDiagnostics([]);
+    setBlockedReasons(new Map());
     setScanPath(path);
 
     try {
@@ -54,7 +64,7 @@ export function useMergedWorktrees() {
   const toggleSelection = useCallback((path: string) => {
     setSelectedPaths((current) => {
       const worktree = worktrees.find((item) => item.path === path);
-      if (!worktree || !isSelectableWorktree(worktree)) return current;
+      if (!worktree || !isSelectableWorktree(worktree) || blockedReasons.has(path)) return current;
 
       const next = new Set(current);
       if (next.has(path)) {
@@ -64,15 +74,15 @@ export function useMergedWorktrees() {
       }
       return next;
     });
-  }, [worktrees]);
+  }, [blockedReasons, worktrees]);
 
   const selectAll = useCallback(() => {
     setSelectedPaths(new Set(
       worktrees
-        .filter(isSelectableWorktree)
+        .filter((worktree) => isSelectableWorktree(worktree) && !blockedReasons.has(worktree.path))
         .map((worktree) => worktree.path),
     ));
-  }, [worktrees]);
+  }, [blockedReasons, worktrees]);
 
   const deselectAll = useCallback(() => {
     setSelectedPaths(new Set());
@@ -81,7 +91,7 @@ export function useMergedWorktrees() {
   const deleteSelected = useCallback(async (
     selectedWorktrees: MergedWorktree[],
     deletedFolders: NodeModulesFolder[],
-  ): Promise<string[]> => {
+  ): Promise<WorktreeDeleteResult[]> => {
     if (isDeleting || isScanning) return [];
 
     const adjustedWorktrees = adjustWorktreeSizes(worktrees, deletedFolders);
@@ -118,23 +128,20 @@ export function useMergedWorktrees() {
       const removedPaths = new Set(
         results.filter((result) => result.success).map((result) => result.path),
       );
-      const nextWorktrees = adjustedWorktrees.filter((worktree) => (
-        !removedPaths.has(worktree.path)
+      const { kept, blocked } = applyWorktreeFailures(
+        adjustedWorktrees.filter((worktree) => !removedPaths.has(worktree.path)),
+        results,
+      );
+
+      updateWorktreeState(kept);
+      setBlockedReasons((current) => new Map([...current, ...blocked]));
+      const keptPaths = new Set(kept.map((worktree) => worktree.path));
+      setSelectedPaths((current) => new Set(
+        Array.from(current).filter((path) => keptPaths.has(path) && !blocked.has(path)),
       ));
 
-      updateWorktreeState(nextWorktrees);
-      setSelectedPaths((current) => {
-        const next = new Set(current);
-        removedPaths.forEach((path) => next.delete(path));
-        return next;
-      });
-
-      const failures = results.filter((result) => !result.success);
-      if (failures.length > 0) {
-        const firstError = failures[0].error ? ` ${failures[0].error}` : '';
-        setError(`Failed to remove ${failures.length} worktree(s).${firstError}`);
-      }
-      return Array.from(removedPaths);
+      setError(describeFailures('worktree', worktreeFailures(results)));
+      return results;
     } catch (err) {
       setError(`Worktree removal failed: ${err}`);
       return [];
@@ -158,6 +165,7 @@ export function useMergedWorktrees() {
     error,
     scanFailed,
     diagnostics,
+    blockedReasons,
     scan,
     toggleSelection,
     selectAll,

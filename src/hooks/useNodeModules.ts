@@ -1,7 +1,16 @@
 import { useState, useCallback, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { NodeModulesFolder, ScanResult, DeleteResult, SortConfig } from '../types';
-import { removeCandidatesWithinPaths } from '../utils/cleanupSummary';
+import {
+  describeFailures,
+  nodeModulesFailures,
+  removeCandidatesWithinPaths,
+} from '../utils/cleanupSummary';
+
+export interface NodeModulesDeletion {
+  results: DeleteResult[];
+  deletedFolders: NodeModulesFolder[];
+}
 
 export function useNodeModules() {
   const [folders, setFolders] = useState<NodeModulesFolder[]>([]);
@@ -9,10 +18,8 @@ export function useNodeModules() {
   const [isScanning, setIsScanning] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [scanPath, setScanPath] = useState<string | null>(null);
-  const [totalSize, setTotalSize] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [sortConfig, setSortConfig] = useState<SortConfig>({ field: 'size', direction: 'desc' });
-  const [deleteResults, setDeleteResults] = useState<DeleteResult[]>([]);
 
   const sortedFolders = useMemo(() => {
     const sorted = [...folders].sort((a, b) => {
@@ -43,14 +50,11 @@ export function useNodeModules() {
     setError(null);
     setFolders([]);
     setSelectedPaths(new Set());
-    setDeleteResults([]);
-    setTotalSize(0);
     setScanPath(path);
 
     try {
       const result = await invoke<ScanResult>('scan_for_node_modules', { path });
       setFolders(result.folders);
-      setTotalSize(result.total_size);
     } catch (err) {
       setError(`Scan failed: ${err}`);
     } finally {
@@ -80,8 +84,8 @@ export function useNodeModules() {
 
   const deleteSelected = useCallback(async (
     paths: string[],
-  ): Promise<NodeModulesFolder[]> => {
-    if (paths.length === 0 || isDeleting || isScanning) return [];
+  ): Promise<NodeModulesDeletion> => {
+    if (paths.length === 0 || isDeleting || isScanning) return { results: [], deletedFolders: [] };
 
     setIsDeleting(true);
     setError(null);
@@ -90,17 +94,16 @@ export function useNodeModules() {
       const selectedPathSet = new Set(paths);
       const deletionTargets = folders.filter((folder) => selectedPathSet.has(folder.path));
       const results = await invoke<DeleteResult[]>('delete_folders', { paths });
-      setDeleteResults(results);
 
-      // Remove successfully deleted folders from the list
-      const successfullyDeleted = new Set<string>();
-      results.forEach((result) => {
-        if (result.success) successfullyDeleted.add(result.path);
-      });
+      const successfullyDeleted = new Set(
+        results.filter((result) => result.success).map((result) => result.path),
+      );
       const deletedFolders = deletionTargets.filter((folder) => (
         successfullyDeleted.has(folder.path)
       ));
 
+      // The reclaimable total is derived from the rows left in the list, so dropping these rows
+      // is the whole adjustment; what was actually freed comes from `removed_bytes`.
       setFolders(prev => prev.filter(f => !successfullyDeleted.has(f.path)));
       setSelectedPaths(prev => {
         const newSet = new Set(prev);
@@ -108,20 +111,11 @@ export function useNodeModules() {
         return newSet;
       });
 
-      // Update total size
-      const deletedSize = deletedFolders
-        .reduce((sum, f) => sum + f.size, 0);
-      setTotalSize(prev => Math.max(0, prev - deletedSize));
-
-      // Check for errors
-      const errors = results.filter(r => !r.success);
-      if (errors.length > 0) {
-        setError(`Failed to delete ${errors.length} folder(s). Check permissions.`);
-      }
-      return deletedFolders;
+      setError(describeFailures('node_modules folder', nodeModulesFailures(results)));
+      return { results, deletedFolders };
     } catch (err) {
       setError(`Delete operation failed: ${err}`);
-      return [];
+      return { results: [], deletedFolders: [] };
     } finally {
       setIsDeleting(false);
     }
@@ -150,7 +144,6 @@ export function useNodeModules() {
     setSelectedPaths((current) => new Set(
       Array.from(current).filter((path) => remainingPaths.has(path)),
     ));
-    setTotalSize(remainingFolders.reduce((total, folder) => total + folder.size, 0));
   }, [folders]);
 
   const selectedSize = useMemo(() => {
@@ -165,11 +158,9 @@ export function useNodeModules() {
     isScanning,
     isDeleting,
     scanPath,
-    totalSize,
     selectedSize,
     error,
     sortConfig,
-    deleteResults,
     scan,
     toggleSelection,
     selectAll,

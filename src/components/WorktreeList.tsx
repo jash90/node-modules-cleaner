@@ -8,6 +8,8 @@ interface WorktreeListProps {
   onToggleSelection: (path: string) => void;
   onSelectAll: () => void;
   onDeselectAll: () => void;
+  /** Rows a removal refused because they stopped being safe to remove, with the reason. */
+  blockedReasons?: Map<string, string>;
   selectionDisabled?: boolean;
 }
 
@@ -28,9 +30,12 @@ export function WorktreeList({
   onToggleSelection,
   onSelectAll,
   onDeselectAll,
+  blockedReasons = new Map(),
   selectionDisabled = false,
 }: WorktreeListProps) {
-  const removable = worktrees.filter(isSelectableWorktree);
+  const removable = worktrees.filter((worktree) => (
+    isSelectableWorktree(worktree) && !blockedReasons.has(worktree.path)
+  ));
   const allSelected = removable.length > 0
     && removable.every((worktree) => selectedPaths.has(worktree.path));
   const someSelected = removable.some((worktree) => selectedPaths.has(worktree.path));
@@ -78,7 +83,10 @@ export function WorktreeList({
           <ul className="divide-y divide-gray-100">
             {worktrees.map((worktree) => {
               const isSelected = selectedPaths.has(worktree.path);
-              const isProtected = !isSelectableWorktree(worktree) || selectionDisabled;
+              const blockedReason = blockedReasons.get(worktree.path);
+              const isProtected = !isSelectableWorktree(worktree)
+                || blockedReason !== undefined
+                || selectionDisabled;
               return (
                 <li key={`${worktree.repository_path}:${worktree.path}`}>
                   <label
@@ -132,6 +140,11 @@ export function WorktreeList({
                         <p className="text-xs font-medium text-amber-700 mt-1">
                           Directory is missing{worktree.stale_reason ? ` (${worktree.stale_reason})` : ''}
                           {' '}— removing this only prunes the leftover Git entry
+                        </p>
+                      )}
+                      {blockedReason && (
+                        <p className="text-xs font-medium text-red-700 mt-1">
+                          {blockedReason} — rescan to check it again
                         </p>
                       )}
                       {worktree.is_dirty && !worktree.is_locked && (

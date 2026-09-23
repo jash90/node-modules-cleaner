@@ -1,6 +1,11 @@
 import { useCallback, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { CacheCleanResult, CacheScanResult, CacheTarget } from '../types';
+import {
+  applyCacheCleanResults,
+  cacheFailures,
+  describeFailures,
+} from '../utils/cleanupSummary';
 
 /**
  * Shared developer caches — package manager stores, versioned runtimes, unrotated logs.
@@ -16,6 +21,8 @@ export function useDevCaches() {
   const [warnings, setWarnings] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [lastCleanup, setLastCleanup] = useState<CacheCleanResult[]>([]);
+  // Pruned by their own tool: still on disk with less inside, so the row stays, marked.
+  const [prunedPaths, setPrunedPaths] = useState<Set<string>>(new Set());
 
   // Paths are unique per target; ids are not (several Gradle versions share one id).
   const keyOf = useCallback((target: CacheTarget) => target.path, []);
@@ -29,6 +36,7 @@ export function useDevCaches() {
     setSelectedIds(new Set());
     setWarnings([]);
     setLastCleanup([]);
+    setPrunedPaths(new Set());
 
     try {
       const result = await invoke<CacheScanResult>('scan_for_dev_caches');
@@ -62,8 +70,9 @@ export function useDevCaches() {
 
   const deselectAll = useCallback(() => setSelectedIds(new Set()), []);
 
-  const cleanSelected = useCallback(async () => {
-    if (isCleaning || isScanning || selectedIds.size === 0) return;
+  /** The cache step of the unified cleanup; returns what the backend reported per target. */
+  const cleanSelected = useCallback(async (): Promise<CacheCleanResult[]> => {
+    if (isCleaning || isScanning || selectedIds.size === 0) return [];
 
     const selected = targets.filter((target) => selectedIds.has(keyOf(target)));
 
@@ -81,25 +90,24 @@ export function useDevCaches() {
 
       setLastCleanup(results);
 
-      // A prune leaves the directory in place with less inside, so re-measure rather than
-      // dropping rows: only entries that vanished entirely should disappear from the list.
-      const cleanedPaths = new Set(
-        results.filter((result) => result.success).map((result) => result.path),
-      );
-      setTargets((current) => current.filter((target) => !cleanedPaths.has(target.path)));
+      // Only entries that vanished or were emptied leave the list; a pruned directory is still
+      // there, so its row stays, marked as pruned (its size is from before the prune).
+      const { remaining, prunedPaths: pruned } = applyCacheCleanResults(targets, results);
+      setTargets(remaining);
+      setPrunedPaths((current) => new Set([...current, ...pruned]));
       setSelectedIds(new Set());
 
-      const failures = results.filter((result) => !result.success);
-      if (failures.length > 0) {
-        const first = failures[0].error ? ` ${failures[0].error}` : '';
-        setError(`Failed to clean ${failures.length} target(s).${first}`);
-      }
+      setError(describeFailures('cache target', cacheFailures(results)));
+      return results;
     } catch (err) {
       setError(`Cache cleanup failed: ${err}`);
+      return [];
     } finally {
       setIsCleaning(false);
     }
   }, [isCleaning, isScanning, keyOf, selectedIds, targets]);
+
+  const clearError = useCallback(() => setError(null), []);
 
   const totalReclaimable = useMemo(
     () => targets.reduce((sum, target) => sum + target.reclaimable_size, 0),
@@ -137,6 +145,7 @@ export function useDevCaches() {
     warnings,
     error,
     lastCleanup,
+    prunedPaths,
     freedBytes,
     totalReclaimable,
     selectedReclaimable,
@@ -146,6 +155,6 @@ export function useDevCaches() {
     selectSafe,
     deselectAll,
     cleanSelected,
-    clearError: () => setError(null),
+    clearError,
   };
 }
