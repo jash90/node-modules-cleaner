@@ -124,7 +124,32 @@ jobs:
             Desktop application for reclaiming disk space from `node_modules` folders,
             merged Git worktrees, and shared developer caches.
 
-            ### Worktree removal that survives a busy machine
+            ### Finding and removing what is really there, with one Remove button
+            - **Remove Selected** now also cleans the developer caches you tick, so the separate
+              "Clean selected" button is gone. One confirmation lists every category with the total
+              it frees, and a failure in one category no longer stops the others: the result says,
+              per category, how many items were removed, how many failed and how much was freed
+            - Every failure now names the path and the reason, and for files owned by another user
+              the `sudo` command to run. Before, a failed delete only said "Check permissions"
+            - A `node_modules` folder that something else already deleted counts as removed
+              instead of failing, and removal only ever touches a real `node_modules` directory —
+              never a symlink, and never another path
+            - Projects inside `.worktrees/` and `.claude/worktrees/` checkouts are found, and a
+              hidden folder picked for scanning is scanned. Build output that merely contains a
+              folder named `node_modules` — Android `.cxx` mirrors, `.next`, bundled `.pnpm` and
+              `.bun` copies, app bundles, and Claude Code's own install under `~/.claude` — is left
+              out, so it is never offered for deletion
+            - Merged worktrees are found in more cases: branches merged with GitHub's "Rebase and
+              merge", squash merges that landed after the base branch moved on, and repositories
+              whose main remote is not called `origin`. One broken branch reference no longer hides
+              a whole repository, and a worktree that was only just created is not offered
+            - Removing a stale worktree entry clears only that entry, not every other stale entry
+              in the repository, and tool clones in hidden folders (`~/.oh-my-zsh`, `~/.nvm`,
+              `~/.tmux/plugins`) are no longer fetched during a worktree scan
+            - Scanning is faster: on a folder of about 150 projects the `node_modules` scan went
+              from about 42 to 30 seconds and the worktree scan from about 36 to 25
+
+            ### Worktree removal that survives a busy machine (1.6.0)
             - Removing worktrees no longer fails on ones something else already removed. A scan is
               a snapshot, and on a machine where agents and scripts clean up after every merge, a
               list can be hours out of date by the time you press Remove. Those worktrees used to
