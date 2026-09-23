@@ -32,6 +32,9 @@ const PRIMARY_REMOTE: &str = "origin";
 /// or `~/.nvm` got `git fetch` run on them although nobody picked them, and trees like
 /// `~/.vscode/extensions` were walked on every scan. Worktrees parked in other hidden folders
 /// are still found through their main repository's `git worktree list`.
+///
+/// The node_modules scan applies the same rule (`WALKED_DOT_DIRS` and `is_skipped_dir` in
+/// `commands.rs`); a new checkout home or `.claude` child belongs in both walks.
 const WALKED_HIDDEN_DIRECTORIES: [&str; 2] = [".worktrees", ".claude"];
 
 /// Local fallbacks, used only when the repository has no usable remote base at all.

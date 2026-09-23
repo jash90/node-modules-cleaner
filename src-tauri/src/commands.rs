@@ -301,6 +301,10 @@ fn get_parent_project(node_modules_path: &Path) -> String {
 /// `.bun`/`.pnpm` outputs, and a `.vscode-test` app bundle for deletion — build products whose
 /// `node_modules` is not a project's install. The root itself is never skipped, so a user who
 /// picks `~/.config` still gets it scanned.
+///
+/// Repository discovery applies the same rule (`WALKED_HIDDEN_DIRECTORIES` and
+/// `is_skipped_directory` in `git_worktrees.rs`); a new checkout home or `.claude` child
+/// belongs in both walks.
 const WALKED_DOT_DIRS: &[&str] = &[".worktrees", ".claude"];
 
 /// Plainly named folders that are huge and never hold a project's own `node_modules`.
