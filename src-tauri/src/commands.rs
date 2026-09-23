@@ -313,6 +313,16 @@ fn is_skipped_dir(path: &Path) -> bool {
     if name.starts_with('.') {
         return !WALKED_DOT_DIRS.contains(&name);
     }
+    // Inside `.claude` only `worktrees` holds checkouts. `local` is Claude Code's own install
+    // and `plugins` its installed plugins — deleting their `node_modules` breaks the CLI.
+    if name != "worktrees"
+        && path
+            .parent()
+            .and_then(Path::file_name)
+            .is_some_and(|parent| parent == ".claude")
+    {
+        return true;
+    }
     // A macOS app bundle ships its own `node_modules` as part of the app; deleting it breaks
     // the app rather than freeing a reinstallable dependency tree.
     if name.ends_with(".app") || SKIPPED_DIRS.contains(&name) {
@@ -754,6 +764,9 @@ mod tests {
             "ext/.vscode-test/Code.app/Contents/Resources/app/node_modules",
             "tools/Editor.app/Contents/Resources/app/node_modules",
             "tool/.opencode/node_modules",
+            // Claude Code's own install and its plugins: deleting them breaks the `claude` CLI.
+            "home/.claude/local/node_modules",
+            "home/.claude/plugins/some-plugin/node_modules",
         ] {
             fs::create_dir_all(root.join(junk)).expect("fixture should be created");
         }

@@ -159,7 +159,7 @@ export function useCleanup(caches: ReturnType<typeof useDevCaches>) {
 
   // The window list is a snapshot from the last scan; the menu bar recounts every fifteen
   // minutes. When both describe the same folder and disagree, the list is the one that aged.
-  const windowCount = countRemovableWorktrees(mergedWorktrees.worktrees);
+  const windowCount = countRemovableWorktrees(mergedWorktrees.worktrees, blockedWorktrees);
   const trayMismatch = detectTrayMismatch({
     stats: trayStats?.stats ?? null,
     statsReceivedAt: trayStats?.receivedAt ?? 0,
