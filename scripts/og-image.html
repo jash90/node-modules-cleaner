@@ -1,0 +1,41 @@
+<!doctype html>
+<!-- Template for site/assets/og-image.png (pl) and og-image-en.png (en), 1200x630.
+     Same layout as the other jash90 app OG images. Render: ?lang=pl|en. Not deployed. -->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; width: 1200px; height: 630px; overflow: hidden; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
+    color: #fff; display: grid; grid-template-columns: 1fr 560px; align-items: center; gap: 24px;
+    padding: 0 48px 0 72px; box-sizing: border-box;
+    background:
+      radial-gradient(700px 400px at 90% 0%, rgba(52,211,153,.35), transparent 65%),
+      linear-gradient(155deg, #06302a 0%, #0b5a4a 60%, #11806a 100%);
+  }
+  /* icon-256.png has an opaque white margin around the squircle (31..225px); crop it */
+  .icon { width: 120px; height: 120px; border-radius: 27px; overflow: hidden; position: relative;
+          box-shadow: 0 12px 22px rgba(0,0,0,.35); }
+  .icon img { position: absolute; width: 158px; height: 158px; left: -19px; top: -19px; }
+  h1 { font-size: 64px; margin: 20px 0 14px; letter-spacing: -1.5px; line-height: 1.05; }
+  p { font-size: 30px; line-height: 1.3; color: #c7f5e3; margin: 0; }
+  img.shot { width: 540px; border-radius: 14px; box-shadow: 0 30px 60px -18px rgba(0,0,0,.6); }
+</style>
+</head>
+<body>
+  <div>
+    <div class="icon"><img src="../site/assets/icon-256.png" alt=""></div>
+    <h1>Node Modules Cleaner</h1>
+    <p id="tagline"></p>
+  </div>
+  <img class="shot" src="../site/assets/screenshots/overview-desktop.webp" alt="">
+  <script>
+    var lang = new URLSearchParams(location.search).get('lang') || 'pl';
+    document.getElementById('tagline').textContent = lang === 'en'
+      ? 'Reclaim disk space from node_modules, worktrees and caches.'
+      : 'Odzyskaj miejsce po node_modules, worktree i cache.';
+    document.documentElement.lang = lang;
+  </script>
+</body>
+</html>
