@@ -331,7 +331,11 @@ fn find_node_modules_paths(scan_path: &Path) -> Vec<PathBuf> {
         .file_name()
         .is_some_and(|name| name == "node_modules")
     {
-        return if scan_path.is_dir() {
+        // `symlink_metadata`, not `is_dir`: the walk below never offers a linked
+        // `node_modules`, and `delete_folders` refuses one, so the root must not either.
+        let is_real_dir =
+            fs::symlink_metadata(scan_path).is_ok_and(|meta| meta.file_type().is_dir());
+        return if is_real_dir {
             vec![scan_path.to_path_buf()]
         } else {
             Vec::new()
@@ -705,6 +709,20 @@ mod tests {
         fs::create_dir_all(&project).expect("fixture should be created");
 
         assert_eq!(find_node_modules_paths(&hidden), vec![project]);
+    }
+
+    /// `delete_folders` refuses symlinks, so offering one would be a row that can only fail.
+    #[cfg(unix)]
+    #[test]
+    fn scan_does_not_offer_a_symlinked_node_modules_picked_as_the_root() {
+        let root = temp_root("symlink-root");
+        let _cleanup = TestDirectory(root.clone());
+        let real = root.join("store");
+        fs::create_dir_all(&real).expect("fixture should be created");
+        let link = root.join("node_modules");
+        std::os::unix::fs::symlink(&real, &link).expect("symlink");
+
+        assert!(find_node_modules_paths(&link).is_empty());
     }
 
     #[test]

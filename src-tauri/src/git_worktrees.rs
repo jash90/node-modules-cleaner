@@ -27,8 +27,9 @@ const PRIMARY_REMOTE: &str = "origin";
 /// Hidden folders the repository walk never enters. Everything else is fair game, dot or not —
 /// worktree tools park checkouts in `.worktrees/` or `.claude/worktrees/`, and skipping every
 /// dot-directory made those invisible. These are the ones that are both large and never hold
-/// anybody's work: Git internals, the Trash, and package-manager or toolchain caches.
-const SKIPPED_HIDDEN_DIRECTORIES: [&str; 9] = [
+/// anybody's work: Git internals, the Trash, package-manager or toolchain caches, and the homes
+/// of runtime version managers (`.nvm` is itself a Git clone, so it would be evaluated too).
+const SKIPPED_HIDDEN_DIRECTORIES: [&str; 17] = [
     ".git",
     ".Trash",
     ".cache",
@@ -38,6 +39,14 @@ const SKIPPED_HIDDEN_DIRECTORIES: [&str; 9] = [
     ".rustup",
     ".gradle",
     ".m2",
+    ".nvm",
+    ".pyenv",
+    ".rbenv",
+    ".volta",
+    ".asdf",
+    ".sdkman",
+    ".bun",
+    ".deno",
 ];
 
 /// Local fallbacks, used only when the repository has no usable remote base at all.
@@ -1535,6 +1544,11 @@ fn remove_prepared_worktree(
 ) -> WorktreeDeleteResult {
     let path = worktree.to_string_lossy().to_string();
 
+    // The "Changed since scan", "No longer merged" and "No longer registered" messages below are
+    // matched by prefix in `classifyWorktreeFailure` (src/utils/cleanupSummary.ts), which decides
+    // whether the row is dropped or blocked. Reword one and it quietly becomes retry-selectable —
+    // change both sides together.
+
     // Checked before anything else: a worktree someone has committed into since the scan is no
     // longer merged either, and "someone committed here" is the message that explains why.
     if let Some(expected) = expected_head.filter(|head| !head.is_empty()) {
@@ -1624,8 +1638,8 @@ fn remove_prepared_worktree(
 /// reach on an unmounted volume. Both paths below touch nothing but this entry's metadata in
 /// `.git/worktrees`:
 ///
-/// * folder missing: `git worktree remove`, without `-f`. Git accepts a missing folder and
-///   deletes just the entry; without `-f` it still refuses a locked one, and should the folder
+/// * folder missing: `git worktree remove`, without `-f`. Git 2.36+ accepts a missing folder and
+///   deletes just the entry (older Git refuses, and the record path below takes over); without `-f` it still refuses a locked one, and should the folder
 ///   have come back as a real worktree in the meantime it refuses to lose changes there too.
 /// * folder present but prunable (its `.git` file is gone or points nowhere): Git refuses to
 ///   remove it — correctly, it cannot vouch for the files — so the entry's own record is
@@ -1642,14 +1656,18 @@ fn remove_stale_registration(repository: &Path, worktree: &Path) -> WorktreeDele
     if !is_registered(repository, worktree) {
         return removed(path);
     }
-    if let Some(error) = git_error {
-        return failed_removal(path, error);
-    }
 
+    // Git before ~2.36 refuses `worktree remove` on a missing folder. The record's own checks
+    // (gitdir must point here, not locked) are the same ones Git applies, so falling back to
+    // them keeps older Git working without widening what gets removed. Git's own refusal is
+    // what the user sees if the fallback cannot clear the entry either.
     match remove_worktree_record(repository, worktree) {
         Ok(()) if !is_registered(repository, worktree) => removed(path),
-        Ok(()) => failed_removal(path, "Git still lists this stale worktree entry"),
-        Err(error) => failed_removal(path, error),
+        Ok(()) => failed_removal(
+            path,
+            git_error.unwrap_or_else(|| "Git still lists this stale worktree entry".to_string()),
+        ),
+        Err(error) => failed_removal(path, git_error.unwrap_or(error)),
     }
 }
 
@@ -3355,6 +3373,28 @@ mod tests {
 
         assert!(discovered.contains(&parked), "{discovered:?}");
         assert!(!discovered.contains(&cached), "{discovered:?}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn skips_version_manager_homes_when_looking_for_repositories() {
+        // `~/.nvm` is itself a Git clone and `~/.pyenv`, `~/.volta` and friends hold large trees
+        // of installed runtimes; none of them holds anybody's worktrees, and walking them costs
+        // every scan of a home folder.
+        let root = scan_root("version-managers");
+        let managers = [
+            ".nvm", ".pyenv", ".rbenv", ".volta", ".asdf", ".sdkman", ".bun", ".deno",
+        ];
+        for manager in managers {
+            fs::create_dir_all(root.join(manager).join("clone").join(".git"))
+                .expect("create version-manager repository marker");
+        }
+        let project = root.join("project");
+        fs::create_dir_all(project.join(".git")).expect("create project repository marker");
+
+        let discovered = super::discover_git_repositories(&root);
+
+        assert_eq!(discovered, vec![project]);
         let _ = fs::remove_dir_all(root);
     }
 
