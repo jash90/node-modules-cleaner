@@ -11,6 +11,8 @@ interface CacheListProps {
   onSelectSafe: () => void;
   onDeselectAll: () => void;
   onScan: () => void;
+  /** Handed to their own tool's prune this session: still on disk, size is from before. */
+  prunedPaths?: Set<string>;
   selectionDisabled?: boolean;
 }
 
@@ -79,6 +81,7 @@ export function CacheList({
   onSelectSafe,
   onDeselectAll,
   onScan,
+  prunedPaths = new Set(),
   selectionDisabled = false,
 }: CacheListProps) {
   const anySelected = targets.some((target) => selectedPaths.has(target.path));
@@ -198,6 +201,11 @@ export function CacheList({
                             <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-gray-100 text-gray-600 text-[10px] font-mono">
                               {methodLabel(target)}
                             </span>
+                            {prunedPaths.has(target.path) && (
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-full bg-green-100 text-green-800 text-[10px] font-medium">
+                                pruned
+                              </span>
+                            )}
                             {age && <span className="text-[11px] text-gray-400">{age}</span>}
                           </div>
 
@@ -218,7 +226,9 @@ export function CacheList({
                                 className="text-[10px] text-gray-400"
                                 title="The tool keeps whatever is still referenced, so only part of this comes back"
                               >
-                                prune frees part of this
+                                {prunedPaths.has(target.path)
+                                  ? 'size before prune — rescan to re-measure'
+                                  : 'prune frees part of this'}
                               </span>
                             </>
                           ) : (

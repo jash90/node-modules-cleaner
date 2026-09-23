@@ -27,6 +27,7 @@ test("combines selected node_modules and worktrees into one summary", () => {
         { label: "node_modules folders", count: 3 },
         { label: "merged Git worktrees", count: 2 },
       ],
+      hasEstimate: false,
     },
   );
 });
@@ -62,6 +63,7 @@ test("does not double-count node_modules inside a selected worktree", () => {
         { label: "node_modules folders", count: 2 },
         { label: "merged Git worktrees", count: 1 },
       ],
+      hasEstimate: false,
     },
   );
 });
@@ -213,4 +215,210 @@ test("flags a stale list only when a fresh menu bar count disagrees after a good
   // A failed scan leaves an empty list; that is an error, not a sign that worktrees changed.
   assert.equal(cleanupSummary.detectTrayMismatch({ ...base, scanFailed: true }), null);
   assert.equal(cleanupSummary.detectTrayMismatch({ ...base, stats: null }), null);
+});
+
+test("adds selected developer caches to the one confirmation summary", () => {
+  assert.deepEqual(
+    createCleanupSummary({
+      nodeModules: [{ path: "/p/a/node_modules", size: 100 }],
+      worktrees: [{ path: "/wt/a", size: 1_000 }],
+      caches: [
+        { path: "/Users/me/.npm/_cacache", size: 300 },
+        { path: "/Users/me/.gradle/caches", size: 50 },
+      ],
+    }),
+    {
+      totalCount: 4,
+      totalSize: 1_450,
+      items: [
+        { label: "node_modules folders", count: 1 },
+        { label: "merged Git worktrees", count: 1 },
+        { label: "developer caches", count: 2 },
+      ],
+      hasEstimate: false,
+    },
+  );
+});
+
+test("marks the total as a floor when a selected cache is handed to a prune command", () => {
+  const summary = createCleanupSummary({
+    nodeModules: [],
+    worktrees: [],
+    caches: [{ path: "/Users/me/.pnpm-store", size: 10, isEstimate: true }],
+  });
+
+  assert.equal(summary.hasEstimate, true);
+  assert.equal(summary.totalCount, 1);
+});
+
+test("lists every failing path with its reason and the sudo hint once", () => {
+  const message = cleanupSummary.describeFailures("node_modules folder", [
+    { path: "/p/a/node_modules", reason: "Permission denied", sudoHint: "sudo chown -R me /p" },
+    { path: "/p/b/node_modules", reason: "Not a node_modules folder", sudoHint: "sudo chown -R me /p" },
+  ]);
+
+  assert.equal(
+    message,
+    [
+      "Failed to remove 2 node_modules folder(s):",
+      "/p/a/node_modules: Permission denied",
+      "/p/b/node_modules: Not a node_modules folder",
+      "Try: sudo chown -R me /p",
+    ].join("\n"),
+  );
+  assert.equal(cleanupSummary.describeFailures("worktree", []), null);
+});
+
+test("names the first file a node_modules delete left behind and how many more", () => {
+  assert.deepEqual(
+    cleanupSummary.nodeModulesFailures([
+      { path: "/p/ok/node_modules", success: true, removed_bytes: 5, error: null, failed_paths: [], sudo_hint: null },
+      {
+        path: "/p/a/node_modules",
+        success: false,
+        removed_bytes: 1,
+        error: "3 item(s) could not be deleted",
+        failed_paths: [
+          { path: "/p/a/node_modules/x/y", reason: "Permission denied" },
+          { path: "/p/a/node_modules/x/z", reason: "Permission denied" },
+          { path: "/p/a/node_modules/w", reason: "Permission denied" },
+        ],
+        sudo_hint: "sudo rm -rf /p/a/node_modules",
+      },
+      { path: "/etc", success: false, removed_bytes: 0, error: "Not a node_modules folder", failed_paths: [], sudo_hint: null },
+    ]),
+    [
+      {
+        path: "/p/a/node_modules",
+        reason: "/p/a/node_modules/x/y: Permission denied (+2 more)",
+        sudoHint: "sudo rm -rf /p/a/node_modules",
+      },
+      { path: "/etc", reason: "Not a node_modules folder", sudoHint: null },
+    ],
+  );
+});
+
+test("drops worktrees that stopped being worktrees and blocks those that stopped being safe", () => {
+  assert.equal(cleanupSummary.classifyWorktreeFailure("No longer registered"), "gone");
+  assert.equal(
+    cleanupSummary.classifyWorktreeFailure("No longer merged into the repository's base branches"),
+    "blocked",
+  );
+  assert.equal(
+    cleanupSummary.classifyWorktreeFailure("Changed since scan — someone committed here"),
+    "blocked",
+  );
+  assert.equal(cleanupSummary.classifyWorktreeFailure("Permission denied"), "retry");
+  assert.equal(cleanupSummary.classifyWorktreeFailure(null), "retry");
+
+  const { kept, blocked } = cleanupSummary.applyWorktreeFailures(
+    [{ path: "/wt/gone" }, { path: "/wt/moved-on" }, { path: "/wt/locked-fs" }, { path: "/wt/other" }],
+    [
+      { path: "/wt/gone", success: false, error: "No longer registered", already_gone: false },
+      { path: "/wt/moved-on", success: false, error: "Changed since scan — someone committed here", already_gone: false },
+      { path: "/wt/locked-fs", success: false, error: "Permission denied", already_gone: false },
+    ],
+  );
+
+  assert.deepEqual(kept.map((worktree) => worktree.path), ["/wt/moved-on", "/wt/locked-fs", "/wt/other"]);
+  assert.deepEqual([...blocked], [["/wt/moved-on", "Changed since scan — someone committed here"]]);
+});
+
+test("keeps pruned cache rows, whose directory is still there, and drops deleted ones", () => {
+  const targets = [
+    { path: "/c/npm", cleanup: { type: "remove_dir" } },
+    { path: "/c/pnpm", cleanup: { type: "external_command" } },
+    { path: "/c/log", cleanup: { type: "truncate_file" } },
+    { path: "/c/failed", cleanup: { type: "remove_dir" } },
+  ];
+  const results = [
+    { path: "/c/npm", success: true },
+    { path: "/c/pnpm", success: true },
+    { path: "/c/log", success: true },
+    { path: "/c/failed", success: false },
+  ];
+
+  const { remaining, prunedPaths } = cleanupSummary.applyCacheCleanResults(targets, results);
+
+  assert.deepEqual(remaining.map((target) => target.path), ["/c/pnpm", "/c/failed"]);
+  assert.deepEqual(prunedPaths, ["/c/pnpm"]);
+});
+
+test("a cache failure does not stop node_modules and worktrees, and is reported", async () => {
+  const calls = [];
+  const report = await cleanupSummary.runUnifiedCleanup(
+    async () => {
+      calls.push("chain");
+      return {
+        nodeModules: { removed: 3, failed: 1, freedBytes: 900 },
+        worktrees: { removed: 1, failed: 0, freedBytes: 0 },
+      };
+    },
+    async () => {
+      calls.push("caches");
+      throw new Error("clean_dev_caches crashed");
+    },
+    { nodeModules: 4, worktrees: 1, caches: 2 },
+  );
+
+  assert.deepEqual(calls.sort(), ["caches", "chain"]);
+  assert.deepEqual(report.nodeModules, { removed: 3, failed: 1, freedBytes: 900, messages: [] });
+  assert.deepEqual(report.worktrees, { removed: 1, failed: 0, freedBytes: 0, messages: [] });
+  assert.deepEqual(report.caches, {
+    removed: 0,
+    failed: 2,
+    freedBytes: 0,
+    messages: ["Error: clean_dev_caches crashed"],
+  });
+});
+
+test("a node_modules/worktree failure does not stop caches", async () => {
+  let cachesRan = false;
+  const report = await cleanupSummary.runUnifiedCleanup(
+    async () => {
+      throw new Error("delete_folders crashed");
+    },
+    async () => {
+      cachesRan = true;
+      return { removed: 2, failed: 0, freedBytes: 700 };
+    },
+    { nodeModules: 2, worktrees: 1, caches: 2 },
+  );
+
+  assert.equal(cachesRan, true);
+  assert.deepEqual(report.caches, { removed: 2, failed: 0, freedBytes: 700, messages: [] });
+  assert.equal(report.nodeModules.failed, 2);
+  assert.equal(report.worktrees.failed, 1);
+  assert.deepEqual(report.nodeModules.messages, ["Error: delete_folders crashed"]);
+});
+
+test("reports each attempted category on its own line", () => {
+  const empty = { removed: 0, failed: 0, freedBytes: 0, messages: [] };
+  assert.deepEqual(
+    cleanupSummary.formatCleanupReport({
+      nodeModules: { ...empty, removed: 3, failed: 1, freedBytes: 1_024 },
+      worktrees: empty,
+      caches: { ...empty, failed: 2, messages: ["Error: crashed"] },
+    }, (bytes) => `${bytes} B`),
+    [
+      "node_modules: removed 3 · failed 1 · freed 1024 B",
+      "developer caches: removed 0 · failed 2 — Error: crashed",
+    ],
+  );
+});
+
+test("counts what was not confirmed removed as failed, and frees only reported bytes", () => {
+  assert.deepEqual(
+    cleanupSummary.countOutcome(3, [
+      { success: true, removed_bytes: 100 },
+      { success: false, removed_bytes: 20 },
+    ]),
+    { removed: 1, failed: 2, freedBytes: 120 },
+  );
+  // A call that threw returns no results: every requested item is a failure.
+  assert.deepEqual(cleanupSummary.countOutcome(2, []), { removed: 0, failed: 2, freedBytes: 0 });
+  assert.deepEqual(
+    cleanupSummary.countOutcome(1, [{ success: true }]),
+    { removed: 1, failed: 0, freedBytes: 0 },
+  );
 });

@@ -282,7 +282,10 @@ mod tests {
         let size = measure_dir(&root);
 
         assert_eq!(size.logical, 64 * 1024);
-        assert!(size.allocated >= 64 * 1024, "blocks cover the written bytes");
+        assert!(
+            size.allocated >= 64 * 1024,
+            "blocks cover the written bytes"
+        );
         assert_eq!(size.reclaimable, size.allocated);
     }
 
